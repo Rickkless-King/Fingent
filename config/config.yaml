@@ -1,0 +1,194 @@
+# ==============================================
+# Fingent 业务配置
+# ==============================================
+
+# 时区设置
+timezone: "America/New_York"
+
+# ==============================================
+# 数据源配置
+# ==============================================
+providers:
+  # 行情数据源优先级
+  quote:
+    us_equity: finnhub      # 美股行情
+    crypto: okx             # 加密货币
+    fallback: yfinance      # 备用
+
+  # 新闻数据源优先级
+  news:
+    primary: alphavantage
+    fallback: finnhub
+
+  # 宏观数据
+  macro:
+    primary: fred
+
+  # 情绪数据 (可选)
+  sentiment:
+    polymarket:
+      enabled: false        # 默认关闭，需手动启用
+
+# ==============================================
+# 监控资产列表
+# ==============================================
+assets:
+  # 美股/ETF
+  us_equity:
+    - symbol: SPY
+      name: "S&P 500 ETF"
+    - symbol: QQQ
+      name: "Nasdaq 100 ETF"
+    - symbol: TLT
+      name: "20+ Year Treasury Bond ETF"
+    - symbol: GLD
+      name: "Gold ETF"
+    - symbol: VIX
+      name: "Volatility Index"
+
+  # 加密货币
+  crypto:
+    - symbol: BTC-USDT
+      name: "Bitcoin"
+    - symbol: ETH-USDT
+      name: "Ethereum"
+
+# ==============================================
+# FRED 宏观指标
+# ==============================================
+macro_indicators:
+  # 利率相关
+  rates:
+    - series_id: FEDFUNDS
+      name: "Federal Funds Rate"
+      frequency: monthly
+    - series_id: DGS10
+      name: "10-Year Treasury Rate"
+      frequency: daily
+    - series_id: DGS2
+      name: "2-Year Treasury Rate"
+      frequency: daily
+
+  # 通胀相关
+  inflation:
+    - series_id: CPIAUCSL
+      name: "CPI All Items"
+      frequency: monthly
+    - series_id: CPILFESL
+      name: "Core CPI"
+      frequency: monthly
+
+  # 就业相关
+  employment:
+    - series_id: UNRATE
+      name: "Unemployment Rate"
+      frequency: monthly
+    - series_id: PAYEMS
+      name: "Nonfarm Payrolls"
+      frequency: monthly
+
+# ==============================================
+# 告警规则 (Rule-based, 不依赖 LLM)
+# ==============================================
+alert_rules:
+  # 跨资产异动
+  - name: btc_crash
+    description: "BTC 24h 跌幅超 8%"
+    condition:
+      metric: btc_24h_change
+      operator: "<"
+      threshold: -0.08
+    severity: high
+
+  - name: gold_surge
+    description: "黄金 24h 涨幅超 3%"
+    condition:
+      metric: gold_24h_change
+      operator: ">"
+      threshold: 0.03
+    severity: medium
+
+  - name: vix_spike
+    description: "VIX 超过 25"
+    condition:
+      metric: vix_level
+      operator: ">"
+      threshold: 25
+    severity: high
+
+  - name: yield_curve_inversion
+    description: "2Y-10Y 利差倒挂加深"
+    condition:
+      metric: yield_spread_2y10y
+      operator: "<"
+      threshold: -0.5
+    severity: high
+
+  # 宏观异动
+  - name: hawkish_shift
+    description: "Fed 鹰派信号增强"
+    condition:
+      metric: hawkish_score
+      operator: ">="
+      threshold: 3
+    severity: medium
+
+# ==============================================
+# 信号阈值配置
+# ==============================================
+signal_thresholds:
+  # 价格变动阈值
+  price_change:
+    significant_24h: 0.05    # 5% 24h 变动视为显著
+    significant_7d: 0.10     # 10% 7d 变动视为显著
+
+  # 情绪阈值
+  sentiment:
+    bullish_threshold: 0.6
+    bearish_threshold: 0.4
+
+# ==============================================
+# 计算规则 (写死，避免不一致)
+# ==============================================
+calculation_rules:
+  # 24h 变化计算方式
+  change_24h: "last_close / close_24h_ago - 1"
+  change_7d: "last_close / close_7d_ago - 1"
+
+  # 数据不足时的处理
+  insufficient_data: "skip_with_warning"
+
+# ==============================================
+# 调度配置
+# ==============================================
+scheduler:
+  # 每日报告时间 (美东时间)
+  daily_report:
+    enabled: true
+    cron: "0 7 * * *"       # 每天早上 7:00
+
+  # 盘中监控 (可选)
+  intraday_check:
+    enabled: false
+    interval_minutes: 15
+
+# ==============================================
+# LLM 配置
+# ==============================================
+llm:
+  # 主 LLM (用于报告生成)
+  primary:
+    provider: deepseek
+    model: deepseek-chat
+    temperature: 0.3
+    max_tokens: 2000
+
+  # 备用 LLM
+  fallback:
+    provider: qwen
+    model: qwen-turbo
+    temperature: 0.3
+    max_tokens: 2000
+
+  # 是否启用 LLM (关闭后只产出结构化数据)
+  enabled: true

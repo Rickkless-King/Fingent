@@ -1,0 +1,33 @@
+version: "3.8"
+
+services:
+  fingent:
+    build: .
+    container_name: fingent
+    env_file:
+      - .env
+    environment:
+      - FINGENT_ENV=local
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config
+    restart: unless-stopped
+    # Override for different run modes:
+    # command: ["python", "-m", "fingent.cli.main", "--once"]
+    # command: ["python", "-m", "fingent.cli.main", "--scheduled"]
+
+  # Optional: Streamlit UI
+  streamlit:
+    build: .
+    container_name: fingent-ui
+    env_file:
+      - .env
+    environment:
+      - FINGENT_ENV=local
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config
+    ports:
+      - "8501:8501"
+    command: ["streamlit", "run", "fingent/ui/streamlit_app.py", "--server.address", "0.0.0.0"]
+    restart: unless-stopped

@@ -1,0 +1,91 @@
+[project]
+name = "fingent"
+version = "0.1.0"
+description = "Fingent - Top-Down Macro Financial Analysis System with LangGraph"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Your Name", email = "your@email.com" }]
+
+dependencies = [
+    # LangGraph & LLM
+    "langgraph>=0.2.0",
+    "langchain>=0.3.0",
+    "langchain-community>=0.3.0",
+    "openai>=1.0.0",
+
+    # HTTP & Async
+    "httpx>=0.27.0",
+    "aiohttp>=3.9.0",
+    "tenacity>=8.2.0",
+
+    # Data Processing
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+
+    # Configuration
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0.0",
+
+    # Data Sources
+    "fredapi>=0.5.0",
+    "finnhub-python>=2.4.0",
+    "yfinance>=0.2.0",
+    "ccxt>=4.0.0",
+    "dbnomics>=1.2.0",        # 全球宏观经济数据 (无需 API Key)
+    "polygon>=1.2.0",         # Polygon.io/Massive 美股数据
+
+    # Database
+    "sqlalchemy>=2.0.0",
+
+    # Scheduling
+    "apscheduler>=3.10.0",
+
+    # CLI
+    "click>=8.1.0",
+    "rich>=13.0.0",
+
+    # UI (optional)
+    "streamlit>=1.30.0",
+
+    # Telegram
+    "python-telegram-bot>=20.0",
+
+    # Utilities
+    "pytz>=2024.1",
+    "cachetools>=5.3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+
+[project.scripts]
+fingent = "fingent.cli.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["fingent"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_ignores = true
