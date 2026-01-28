@@ -6,13 +6,20 @@ Run with: streamlit run fingent/ui/streamlit_app.py
 
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Import Fingent modules
 from fingent.core.config import get_settings, load_yaml_config
 from fingent.services.persistence import create_persistence_service
 from fingent.graph.builder import run_workflow, create_default_workflow
 from fingent.graph.state import create_initial_state
+
+# LLM imports for on-demand summary
+try:
+    from fingent.services.llm import create_llm_service, generate_morning_brief
+    LLM_AVAILABLE = True
+except ImportError:
+    LLM_AVAILABLE = False
 
 # Arbitrage imports (optional - graceful if not available)
 try:
@@ -100,7 +107,7 @@ def run_analysis():
 
 
 def show_latest_report(persistence):
-    """Display the latest analysis report."""
+    """Display the latest analysis report with improved UI."""
     latest = persistence.load_latest()
 
     if not latest:
@@ -111,13 +118,62 @@ def show_latest_report(persistence):
     signals = latest.get("signals", [])
     alerts = latest.get("alerts", [])
     errors = latest.get("errors", [])
+    news_data = latest.get("news_data", {})
 
-    # Header metrics
-    col1, col2, col3, col4 = st.columns(4)
+    # ============================================
+    # Section 1: Morning Brief / AI Summary
+    # ============================================
+    st.header("Today's Market Brief")
 
+    # Check if AI summary exists in session state
+    if "ai_summary" not in st.session_state:
+        st.session_state.ai_summary = None
+
+    # Show existing summary or template
+    if report.get("summary"):
+        # Show the existing summary (from pipeline)
+        with st.container():
+            st.markdown(f"> {report['summary']}")
+    elif st.session_state.ai_summary:
+        # Show AI-generated summary
+        with st.container():
+            st.markdown(f"**AI Analysis:**\n\n{st.session_state.ai_summary}")
+    else:
+        # Show template summary
+        signals_summary = report.get("signals_summary", {})
+        direction = signals_summary.get("overall_direction", "neutral")
+        score = signals_summary.get("overall_score", 0)
+
+        template_summary = _generate_template_summary(direction, score, signals, alerts)
+        st.markdown(template_summary)
+
+    # AI Generate button
+    if LLM_AVAILABLE:
+        col1, col2 = st.columns([1, 4])
+        with col1:
+            if st.button("✨ Generate AI Analysis", help="Use LLM to generate detailed analysis"):
+                with st.spinner("Generating AI analysis..."):
+                    try:
+                        llm = create_llm_service()
+                        if llm:
+                            summary = generate_morning_brief(llm, latest)
+                            st.session_state.ai_summary = summary
+                            st.rerun()
+                        else:
+                            st.error("LLM not configured. Check API keys in .env")
+                    except Exception as e:
+                        st.error(f"Failed to generate: {e}")
+
+    st.divider()
+
+    # ============================================
+    # Section 2: Key Metrics (compact)
+    # ============================================
     signals_summary = report.get("signals_summary", {})
     direction = signals_summary.get("overall_direction", "neutral")
     score = signals_summary.get("overall_score", 0)
+
+    col1, col2, col3, col4 = st.columns(4)
 
     with col1:
         direction_emoji = {
@@ -133,51 +189,78 @@ def show_latest_report(persistence):
         st.metric("Signals", len(signals))
 
     with col3:
-        st.metric("Alerts", len(alerts))
+        alert_color = "normal" if not alerts else "inverse"
+        st.metric("Alerts", len(alerts), delta="!" if alerts else None, delta_color=alert_color)
 
     with col4:
         st.metric("Errors", len(errors))
 
+    # ============================================
+    # Section 3: News (compact list - title + time + score)
+    # ============================================
+    st.header("News")
+
+    articles = news_data.get("articles", [])
+    if articles:
+        _render_news_compact(articles[:15])  # Show top 15, expandable
+    else:
+        st.info("No news articles available")
+
     st.divider()
 
-    # Summary
-    if report.get("summary"):
-        st.header("Summary")
-        st.markdown(report["summary"])
+    # ============================================
+    # Section 4: Market Data (compact cards)
+    # ============================================
+    st.header("Market Overview")
 
-    # Trend charts from history
-    history_df = build_history_df(persistence, limit=20)
-    if not history_df.empty:
-        st.header("Trends")
-        chart_cols = st.columns(2)
-        with chart_cols[0]:
-            st.subheader("Signals & Alerts")
-            st.line_chart(
-                history_df.set_index("timestamp")[["signals", "alerts"]],
-                use_container_width=True,
-            )
-        with chart_cols[1]:
-            st.subheader("Overall Score")
-            st.line_chart(
-                history_df.set_index("timestamp")[["overall_score"]],
-                use_container_width=True,
-            )
+    market_data = latest.get("market_data", {})
+    macro_data = latest.get("macro_data", {})
 
-    # Two columns: Signals and Alerts
     col1, col2 = st.columns(2)
 
     with col1:
-        st.header("Signals")
+        st.subheader("Prices")
+        _render_market_cards(market_data)
+
+    with col2:
+        st.subheader("Macro Indicators")
+        _render_macro_cards(macro_data)
+
+    st.divider()
+
+    # ============================================
+    # Section 5: Signals & Alerts (collapsible)
+    # ============================================
+    with st.expander("📊 Signals Detail", expanded=False):
         if signals:
             df = pd.DataFrame(signals)
-            df = df[["name", "direction", "score", "confidence", "source_node"]]
+            display_cols = ["name", "direction", "score", "confidence", "source_node"]
+            df = df[[c for c in display_cols if c in df.columns]]
             df = df.sort_values("score", key=abs, ascending=False)
-            st.dataframe(df, use_container_width=True)
+
+            # Color code by direction
+            st.dataframe(
+                df,
+                use_container_width=True,
+                column_config={
+                    "score": st.column_config.ProgressColumn(
+                        "Score",
+                        min_value=-1,
+                        max_value=1,
+                        format="%.2f"
+                    ),
+                    "confidence": st.column_config.ProgressColumn(
+                        "Confidence",
+                        min_value=0,
+                        max_value=1,
+                        format="%.0%%"
+                    ),
+                }
+            )
         else:
             st.info("No signals")
 
-    with col2:
-        st.header("Alerts")
+    with st.expander("⚠️ Alerts Detail", expanded=bool(alerts)):
         if alerts:
             for alert in alerts:
                 severity = alert.get("severity", "medium")
@@ -190,46 +273,165 @@ def show_latest_report(persistence):
         else:
             st.success("No alerts triggered")
 
-    # Report sections
-    sections = report.get("sections", [])
-    if sections:
-        st.header("Report Sections")
-        for section in sections:
-            st.subheader(section.get("title", "Section"))
-            if section.get("content"):
-                st.write(section["content"])
-            key_points = section.get("key_points", [])
-            if key_points:
-                st.markdown("\n".join([f"- {p}" for p in key_points]))
-
-    # News list
-    news_data = latest.get("news_data", {})
-    articles = news_data.get("articles", [])
-    if articles:
-        st.header("News")
-        for article in articles:
-            title = article.get("title", "Untitled")
-            url = article.get("url")
-            source = article.get("source", "unknown")
-            published_at = article.get("published_at", "")
-            summary = article.get("summary", "")
-            with st.expander(f"{title} ({source})"):
-                if url:
-                    st.markdown(f"[Link]({url})")
-                if published_at:
-                    st.caption(f"Published: {published_at}")
-                if summary:
-                    st.write(summary)
-
-    # Errors
+    # Errors (if any)
     if errors:
-        st.header("Errors")
-        for error in errors:
-            st.warning(f"**{error.get('node')}**: {error.get('error')}")
+        with st.expander("❌ Errors", expanded=True):
+            for error in errors:
+                st.warning(f"**{error.get('node')}**: {error.get('error')}")
+
+
+def _generate_template_summary(direction: str, score: float, signals: list, alerts: list) -> str:
+    """Generate a template-based summary without LLM."""
+    direction_text = {
+        "bullish": "bullish (risk-on)",
+        "bearish": "bearish (risk-off)",
+        "neutral": "neutral",
+        "hawkish": "hawkish (tightening bias)",
+        "dovish": "dovish (easing bias)",
+    }.get(direction, "neutral")
+
+    summary = f"**Market Direction:** {direction_text.upper()} (score: {score:+.2f})\n\n"
+
+    if signals:
+        top_signals = sorted(signals, key=lambda x: abs(x.get("score", 0)), reverse=True)[:3]
+        summary += "**Key Signals:**\n"
+        for sig in top_signals:
+            summary += f"- {sig.get('name')}: {sig.get('direction')} ({sig.get('score', 0):+.2f})\n"
+
+    if alerts:
+        summary += f"\n**Alerts:** {len(alerts)} triggered - review recommended"
+    else:
+        summary += "\n**Alerts:** None"
+
+    summary += "\n\n*Click 'Generate AI Analysis' for detailed interpretation.*"
+
+    return summary
+
+
+def _render_news_compact(articles: list):
+    """Render news as compact expandable list: title (time) + score."""
+    for article in articles:
+        title = article.get("title", "Untitled")
+        source = article.get("source", "Unknown")
+        published_at = article.get("published_at", "")
+        summary = article.get("summary", "")
+        url = article.get("url", "")
+        sentiment = article.get("sentiment_score", 0)
+
+        # Format time
+        time_str = ""
+        if published_at:
+            try:
+                dt = datetime.fromisoformat(published_at.replace("Z", "+00:00"))
+                now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+                diff = now - dt
+                if diff < timedelta(hours=1):
+                    time_str = f"{int(diff.total_seconds() / 60)}m"
+                elif diff < timedelta(days=1):
+                    time_str = f"{int(diff.total_seconds() / 3600)}h"
+                else:
+                    time_str = dt.strftime("%m/%d")
+            except Exception:
+                time_str = published_at[:10] if len(published_at) > 10 else published_at
+
+        # Sentiment color and icon
+        if sentiment > 0.3:
+            sent_icon = "🟢"
+            sent_color = "green"
+        elif sentiment < -0.3:
+            sent_icon = "🔴"
+            sent_color = "red"
+        else:
+            sent_icon = "⚪"
+            sent_color = "gray"
+
+        # Compact header: icon + title (time) + score
+        header_title = f"{sent_icon} {title[:60]}{'...' if len(title) > 60 else ''}"
+        if time_str:
+            header_title += f" ({time_str})"
+
+        # Expandable for details
+        with st.expander(header_title, expanded=False):
+            # Score display
+            st.markdown(
+                f"**Sentiment:** <span style='color:{sent_color}'>{sentiment:+.2f}</span> | "
+                f"**Source:** {source}",
+                unsafe_allow_html=True
+            )
+
+            # Summary
+            if summary:
+                st.markdown(summary[:300] + "..." if len(summary) > 300 else summary)
+
+            # Link
+            if url:
+                st.markdown(f"[Read full article]({url})")
+
+
+def _render_market_cards(market_data: dict):
+    """Render market data as compact cards."""
+    quotes = market_data.get("quotes", {})
+
+    if not quotes:
+        st.info("No market data")
+        return
+
+    # Create 2-column layout for cards
+    symbols = list(quotes.keys())
+    for i in range(0, len(symbols), 2):
+        cols = st.columns(2)
+        for j, col in enumerate(cols):
+            if i + j < len(symbols):
+                symbol = symbols[i + j]
+                q = quotes[symbol]
+                with col:
+                    price = q.get("price", 0)
+                    change = q.get("change_24h", 0) or 0
+
+                    # Format change
+                    change_str = f"{change:+.2%}" if change else "N/A"
+                    delta_color = "normal" if change >= 0 else "inverse"
+
+                    st.metric(
+                        symbol,
+                        f"${price:,.2f}" if price else "N/A",
+                        change_str,
+                        delta_color=delta_color
+                    )
+
+
+def _render_macro_cards(macro_data: dict):
+    """Render macro data as compact cards."""
+    rates = macro_data.get("rates", {})
+    inflation = macro_data.get("inflation", {})
+
+    metrics = []
+
+    if rates.get("fed_funds_rate"):
+        metrics.append(("Fed Rate", f"{rates['fed_funds_rate']:.2f}%", None))
+
+    if rates.get("yield_spread_2y10y") is not None:
+        spread = rates["yield_spread_2y10y"]
+        metrics.append(("2Y-10Y Spread", f"{spread:+.2f}%", "inverse" if spread < 0 else "normal"))
+
+    if inflation.get("cpi_yoy"):
+        metrics.append(("CPI YoY", f"{inflation['cpi_yoy']:.1f}%", None))
+
+    if not metrics:
+        st.info("No macro data")
+        return
+
+    for i in range(0, len(metrics), 2):
+        cols = st.columns(2)
+        for j, col in enumerate(cols):
+            if i + j < len(metrics):
+                name, value, _ = metrics[i + j]
+                with col:
+                    st.metric(name, value)
 
 
 def show_history(persistence):
-    """Show analysis history."""
+    """Show analysis history with improved display."""
     st.header("Analysis History")
 
     snapshots = persistence.list_snapshots(limit=20)
@@ -238,34 +440,75 @@ def show_history(persistence):
         st.info("No history yet")
         return
 
-    df = pd.DataFrame(snapshots)
-    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    # Summary cards for recent runs
+    st.subheader("Recent Runs")
 
-    st.dataframe(df, use_container_width=True)
+    for i, snap in enumerate(snapshots[:5]):
+        with st.container():
+            col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+            with col1:
+                ts = snap.get("timestamp", "")
+                st.markdown(f"**{ts[:19]}**")
+            with col2:
+                st.metric("Signals", snap.get("signal_count", 0), label_visibility="collapsed")
+            with col3:
+                st.metric("Alerts", snap.get("alert_count", 0), label_visibility="collapsed")
+            with col4:
+                if st.button("View", key=f"view_{snap['run_id']}"):
+                    st.session_state.selected_run = snap["run_id"]
 
-    st.subheader("History Trends")
+        if i < 4:
+            st.markdown("---")
+
+    st.divider()
+
+    # Trend chart
+    st.subheader("Trends")
     history_df = build_history_df(persistence, limit=20)
     if not history_df.empty:
-        st.line_chart(
-            history_df.set_index("timestamp")[["signals", "alerts", "overall_score"]],
-            use_container_width=True,
-        )
+        tab1, tab2 = st.tabs(["Score Trend", "Signals & Alerts"])
+        with tab1:
+            st.line_chart(
+                history_df.set_index("timestamp")[["overall_score"]],
+                use_container_width=True,
+            )
+        with tab2:
+            st.line_chart(
+                history_df.set_index("timestamp")[["signals", "alerts"]],
+                use_container_width=True,
+            )
 
-    # Select a run to view
+    # Detail view
+    st.divider()
+    st.subheader("Run Details")
+
     selected_run = st.selectbox(
-        "Select a run to view details",
+        "Select a run to view",
         options=[s["run_id"] for s in snapshots],
+        format_func=lambda x: f"{x[:8]}... ({next((s['timestamp'][:16] for s in snapshots if s['run_id'] == x), '')})"
     )
 
     if selected_run:
         state = persistence.load_snapshot(selected_run)
         if state:
-            st.json(state.get("report", {}))
+            report = state.get("report", {})
+
+            with st.expander("Report Summary", expanded=True):
+                if report.get("summary"):
+                    st.markdown(report["summary"])
+                else:
+                    st.info("No summary")
+
+            with st.expander("Signals Summary"):
+                st.json(report.get("signals_summary", {}))
+
+            with st.expander("Full Report"):
+                st.json(report)
 
 
 def show_raw_data(persistence):
-    """Show raw state data."""
-    st.header("Raw Data")
+    """Show raw state data with better organization."""
+    st.header("Raw Data Explorer")
 
     latest = persistence.load_latest()
 
@@ -273,16 +516,70 @@ def show_raw_data(persistence):
         st.info("No data")
         return
 
+    # Overview
+    st.subheader("Data Overview")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        macro_count = len(latest.get("macro_data", {}).get("rates", {}))
+        st.metric("Macro Indicators", macro_count)
+    with col2:
+        market_count = len(latest.get("market_data", {}).get("quotes", {}))
+        st.metric("Market Quotes", market_count)
+    with col3:
+        news_count = len(latest.get("news_data", {}).get("articles", []))
+        st.metric("News Articles", news_count)
+    with col4:
+        signal_count = len(latest.get("signals", []))
+        st.metric("Signals", signal_count)
+
+    st.divider()
+
+    # Tabs for different data types
     tab1, tab2, tab3, tab4 = st.tabs(["Macro", "Market", "News", "Full State"])
 
     with tab1:
-        st.json(latest.get("macro_data", {}))
+        macro = latest.get("macro_data", {})
+        if macro:
+            # Rates
+            if macro.get("rates"):
+                st.subheader("Interest Rates")
+                rates_df = pd.DataFrame([macro["rates"]])
+                st.dataframe(rates_df, use_container_width=True)
+
+            # Inflation
+            if macro.get("inflation"):
+                st.subheader("Inflation")
+                st.json(macro["inflation"])
+
+            # Employment
+            if macro.get("employment"):
+                st.subheader("Employment")
+                st.json(macro["employment"])
+        else:
+            st.info("No macro data")
 
     with tab2:
-        st.json(latest.get("market_data", {}))
+        market = latest.get("market_data", {})
+        if market.get("quotes"):
+            quotes_list = [
+                {"symbol": k, **v}
+                for k, v in market["quotes"].items()
+            ]
+            df = pd.DataFrame(quotes_list)
+            st.dataframe(df, use_container_width=True)
+        else:
+            st.info("No market data")
 
     with tab3:
-        st.json(latest.get("news_data", {}))
+        news = latest.get("news_data", {})
+        articles = news.get("articles", [])
+        if articles:
+            df = pd.DataFrame(articles)
+            display_cols = ["title", "source", "published_at", "sentiment_score"]
+            df = df[[c for c in display_cols if c in df.columns]]
+            st.dataframe(df, use_container_width=True)
+        else:
+            st.info("No news data")
 
     with tab4:
         st.json(latest)
