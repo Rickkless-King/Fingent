@@ -210,6 +210,9 @@ __marimo__/
 # Fingent Project Specific
 # ==============================================
 
+# Design documents (internal only)
+fingent_arb.md
+
 # Data directory (SQLite, logs, snapshots)
 data/
 *.db

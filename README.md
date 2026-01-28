@@ -29,7 +29,7 @@
 │                         数据源层                                 │
 ├─────────────┬─────────────┬─────────────┬──────────────────────┤
 │    FRED     │   Finnhub   │ AlphaVantage│  Polymarket(可选)    │
-│  (宏观经济)  │  (行情/新闻) │  (新闻情绪)  │   (预测市场)         │
+│  (宏观经济)  │  (行情/新闻) │  (新闻情绪)  │ (预测市场+CLOB)      │
 └──────┬──────┴──────┬──────┴──────┬──────┴───────────┬──────────┘
        │             │             │                  │
        ▼             ▼             ▼                  ▼
@@ -37,30 +37,33 @@
 │                      Provider 适配层                             │
 │   FREDProvider / FinnhubProvider / AlphaVantageProvider / ...   │
 │         (统一接口、超时重试、缓存、错误处理)                        │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                     LangGraph 工作流                             │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────────────┐  │
-│  │Bootstrap │→ │  Macro   │→ │  Cross   │→ │      News       │  │
-│  │  Node    │  │ Auditor  │  │  Asset   │  │     Impact      │  │
-│  └──────────┘  └──────────┘  └──────────┘  └────────┬────────┘  │
-│                                                     │           │
-│                              ┌───────────────────────           │
-│                              ▼                                  │
-│                      ┌─────────────────┐                        │
-│                      │   Synthesize    │                        │
-│                      │   & Alert Node  │                        │
-│                      └────────┬────────┘                        │
-└───────────────────────────────┼─────────────────────────────────┘
-                                │
-              ┌─────────────────┼─────────────────┐
-              ▼                 ▼                 ▼
-        ┌──────────┐     ┌──────────┐      ┌──────────┐
-        │ Telegram │     │ Streamlit│      │  SQLite  │
-        │   告警    │     │   面板   │      │  存档    │
-        └──────────┘     └──────────┘      └──────────┘
+└──────────────────────────┬────────────────────┬─────────────────┘
+                           │                    │
+           ┌───────────────┘                    └───────────────┐
+           ▼                                                    ▼
+┌─────────────────────────────────────────┐    ┌────────────────────────────┐
+│           LangGraph 工作流               │    │     Arbitrage Engine       │
+│  ┌──────────┐  ┌──────────┐             │    │  ┌────────────────────┐    │
+│  │Bootstrap │→ │  Macro   │→ ...        │    │  │  News Trigger      │    │
+│  │  Node    │  │ Auditor  │             │    │  │  (Finnhub Keywords)│    │
+│  └──────────┘  └──────────┘             │    │  └─────────┬──────────┘    │
+│                      ↓                  │    │            ▼               │
+│           ┌─────────────────┐           │    │  ┌────────────────────┐    │
+│           │   Synthesize    │           │    │  │ Term Structure     │    │
+│           │   & Alert Node  │           │    │  │ Strategy           │    │
+│           └────────┬────────┘           │    │  └─────────┬──────────┘    │
+└────────────────────┼────────────────────┘    │            ▼               │
+                     │                         │  ┌────────────────────┐    │
+                     │                         │  │ Risk Manager       │    │
+                     │                         │  └─────────┬──────────┘    │
+                     │                         └────────────┼───────────────┘
+                     │                                      │
+              ┌──────┴──────┬───────────────────────────────┘
+              ▼             ▼                 ▼
+        ┌──────────┐  ┌──────────┐      ┌──────────┐
+        │ Telegram │  │ Streamlit│      │  SQLite  │
+        │   告警    │  │   面板   │      │  存档    │
+        └──────────┘  └──────────┘      └──────────┘
 ```
 
 ### 三层架构
@@ -119,7 +122,13 @@ Fingent/
 │   │   ├── finnhub.py          # Finnhub 行情/新闻
 │   │   ├── alphavantage.py     # AlphaVantage 新闻情绪
 │   │   ├── okx.py              # OKX Crypto 行情
-│   │   └── polymarket.py       # Polymarket（可选）
+│   │   └── polymarket.py       # Polymarket（可选，含 CLOB 支持）
+│   │
+│   ├── arb/                    # Polymarket 套利检测
+│   │   ├── __init__.py
+│   │   ├── engine.py           # 套利引擎（协调全流程）
+│   │   ├── strategy.py         # 期限结构策略
+│   │   └── risk.py             # 风险控制
 │   │
 │   ├── nodes/                  # LangGraph 节点
 │   │   ├── base.py             # BaseNode 抽象类
@@ -385,6 +394,108 @@ calculation_rules:
 ### 新增告警规则
 
 在 `config/config.yaml` 的 `alert_rules` 中添加新规则即可，无需改代码。
+
+---
+
+## Polymarket 套利检测（Arbitrage）
+
+### 功能概述
+
+Fingent 集成了 Polymarket 期限结构套利检测功能，可以：
+
+1. **新闻触发**：监听 Finnhub 新闻，关键词匹配时触发扫描
+2. **市场召回**：从 Polymarket Gamma API 搜索相关事件/市场
+3. **期限结构检测**：同一事件下不同到期日的市场，检测概率变动不同步
+4. **风险过滤**：成交量、价差、深度、冷却时间等过滤器
+5. **可视化**：Streamlit Dashboard 的 Arbitrage 选项卡
+
+### 核心逻辑
+
+**期限结构套利 (Term Structure Arbitrage)**：
+
+```
+同一事件，不同到期日的市场（如 3月到期 vs 5月到期）
+当短期市场概率剧变，但长期市场未同步变化时，可能存在套利机会
+
+delta_short = current_mid(short) - p0(short)
+delta_long = current_mid(long) - p0(long)
+
+if abs(delta_short - delta_long) > threshold:
+    → 检测到期限结构错位
+```
+
+### 配置
+
+在 `config/config.yaml` 中配置：
+
+```yaml
+arbitrage:
+  enabled: true  # 启用套利检测
+
+  # 触发关键词（正则表达式）
+  trigger_keywords:
+    - "(H200|H100|NVIDIA|NVDA)"
+    - "(Fed|CPI|inflation|rate cut)"
+    - "(Trump|tariff)"
+
+  # 期限结构策略
+  term_structure:
+    delta_threshold: 0.05      # 5% 差值触发
+    trigger_window_minutes: 120
+
+  # 风控参数
+  risk:
+    min_volume_24h: 5000       # 最小成交量 $5000
+    max_spread_bps: 300        # 最大价差 3%
+    min_depth_usd: 1000        # 最小深度 $1000
+    cooldown_seconds: 900      # 冷却 15 分钟
+```
+
+### 使用方法
+
+**方法 1：Streamlit Dashboard**
+
+```bash
+streamlit run fingent/ui/streamlit_app.py
+# 点击 "Arbitrage" 选项卡 → "Scan Polymarket"
+```
+
+**方法 2：代码调用**
+
+```python
+from fingent.arb.engine import ArbEngine
+
+engine = ArbEngine()
+
+# 手动扫描
+opportunities = engine.run_scan()
+
+# 新闻触发扫描
+opportunities = engine.process_news(
+    headline="NVIDIA announces H200 sales to China",
+    summary="...",
+)
+
+# 完整流程（含 Finnhub 新闻）
+results = engine.run_full_pipeline(use_finnhub=True)
+```
+
+### 数据模型
+
+| 模型 | 说明 |
+|------|------|
+| `PolymarketEvent` | 事件（包含多个市场） |
+| `PolymarketMarket` | 市场（含 CLOB token IDs、tenor_days） |
+| `PolymarketQuote` | 订单簿报价（bid/ask/mid/depth/spread） |
+| `ArbSnapshot` | 初始价格快照（P0，用于计算 delta） |
+| `ArbOpportunity` | 套利机会（legs、edge、confidence、risk_flags） |
+
+### 注意事项
+
+- Polymarket API 在某些地区可能有访问限制
+- 套利检测需要同一事件有 2+ 个不同到期的市场
+- 默认为纸面交易（PAPER），不自动下单
+- LLM 仅用于解释，不参与套利判断
 
 ---
 

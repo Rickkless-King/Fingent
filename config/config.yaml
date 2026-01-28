@@ -28,7 +28,7 @@ providers:
   # 情绪数据 (可选)
   sentiment:
     polymarket:
-      enabled: false        # 默认关闭，需手动启用
+      enabled: true        # 默认关闭，需手动启用
 
 # ==============================================
 # 运行模式与免费额度配置
@@ -219,3 +219,62 @@ llm:
 
   # 是否启用 LLM (关闭后只产出结构化数据)
   enabled: true
+
+# ==============================================
+# Polymarket 套利配置 (Arbitrage)
+# ==============================================
+arbitrage:
+  # 是否启用套利检测
+  enabled: true  # 默认关闭，需手动启用
+
+  # 新闻触发关键词 (正则表达式)
+  trigger_keywords:
+    - "(H200|H100|B100|NVIDIA|NVDA|Blackwell|HBM)"
+    - "(TSMC|SK Hynix|Samsung|semiconductor|chip)"
+    - "(Fed|CPI|inflation|rate cut|rate hike|FOMC)"
+    - "(Trump|tariff|Greenland|trade war)"
+    - "(GPU|AI|artificial intelligence)"
+
+  # 监控的 Polymarket 标签
+  polymarket_tags:
+    - "ai"
+    - "fed"
+    - "politics"
+    - "tech"
+    - "crypto"
+
+  # 期限结构策略参数
+  term_structure:
+    # Delta 差值阈值 (5% = 0.05)
+    delta_threshold: 0.05
+    # 触发窗口 (分钟)
+    trigger_window_minutes: 120
+    # 每个 event 最多监控的 market 数量
+    max_markets_per_event: 10
+
+  # 风控参数
+  risk:
+    # 最小 24h 成交量 (USD)
+    min_volume_24h: 5000
+    # 最大价差 (bps, 300 = 3%)
+    max_spread_bps: 300
+    # 最小深度 (USD)
+    min_depth_usd: 1000
+    # 距离结算最小时间 (小时)
+    min_time_to_settle_hours: 12
+    # 同一 event 冷却时间 (秒)
+    cooldown_seconds: 900
+
+  # 快照配置
+  snapshot:
+    # 快照过期时间 (秒, 6小时)
+    ttl_seconds: 21600
+    # 报价刷新间隔 (秒)
+    quote_refresh_seconds: 60
+
+  # 通知配置
+  notify:
+    # 是否推送 Telegram
+    telegram_enabled: true
+    # 节流时间 (分钟)
+    throttle_minutes: 30

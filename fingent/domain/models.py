@@ -207,3 +207,214 @@ class CrossAssetSnapshot:
             risk_on_score=data.get("risk_on_score"),
             yield_spread_2y10y=data.get("yield_spread_2y10y"),
         )
+
+
+# ==============================================
+# Polymarket Arbitrage Models
+# ==============================================
+
+@dataclass
+class PolymarketEvent:
+    """
+    Polymarket event (a group of related markets).
+
+    An event contains multiple markets with different outcomes or tenors.
+    """
+    event_id: str
+    title: str
+    slug: str
+    description: str = ""
+    end_date: Optional[str] = None
+    active: bool = True
+    markets: list[str] = field(default_factory=list)  # market_ids
+    tags: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "PolymarketEvent":
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
+class PolymarketMarket:
+    """
+    Single Polymarket market with CLOB data.
+
+    Maps to a pair of CLOB token IDs (YES/NO outcomes).
+    """
+    market_id: str
+    event_id: str
+    question: str
+    outcomes: list[str] = field(default_factory=lambda: ["Yes", "No"])
+    end_time: Optional[str] = None
+    active: bool = True
+
+    # CLOB token IDs for trading
+    yes_token_id: Optional[str] = None
+    no_token_id: Optional[str] = None
+    condition_id: Optional[str] = None
+
+    # Metadata
+    tags: list[str] = field(default_factory=list)
+    volume: float = 0.0
+    liquidity: float = 0.0
+
+    # Calculated field for term structure
+    tenor_days: int = 0  # Days until end_time
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "PolymarketMarket":
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
+class PolymarketQuote:
+    """
+    Orderbook quote from Polymarket CLOB.
+
+    Contains bid/ask/mid and depth information for tradability assessment.
+    """
+    market_id: str
+    timestamp: str
+
+    # Prices (probability 0-1)
+    bid: float = 0.0
+    ask: float = 1.0
+    mid: float = 0.5
+
+    # Spread metrics
+    spread: float = 0.0         # ask - bid
+    spread_bps: float = 0.0     # (spread / mid) * 10000
+
+    # Liquidity depth ($ available near best price)
+    depth_bid: float = 0.0
+    depth_ask: float = 0.0
+
+    # Volume
+    volume_24h: Optional[float] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "PolymarketQuote":
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+    @classmethod
+    def from_orderbook(cls, market_id: str, book: dict, timestamp: str) -> "PolymarketQuote":
+        """Create Quote from CLOB orderbook response."""
+        bids = book.get("bids", [])
+        asks = book.get("asks", [])
+
+        # Best bid/ask
+        best_bid = float(bids[0]["price"]) if bids else 0.0
+        best_ask = float(asks[0]["price"]) if asks else 1.0
+        mid = (best_bid + best_ask) / 2 if best_bid and best_ask else 0.5
+
+        # Spread
+        spread = best_ask - best_bid
+        spread_bps = (spread / mid * 10000) if mid > 0 else 0
+
+        # Depth (sum of size near best price, simplified)
+        depth_bid = sum(float(b.get("size", 0)) * float(b.get("price", 0)) for b in bids[:5])
+        depth_ask = sum(float(a.get("size", 0)) * float(a.get("price", 0)) for a in asks[:5])
+
+        return cls(
+            market_id=market_id,
+            timestamp=timestamp,
+            bid=best_bid,
+            ask=best_ask,
+            mid=mid,
+            spread=spread,
+            spread_bps=spread_bps,
+            depth_bid=depth_bid,
+            depth_ask=depth_ask,
+        )
+
+
+@dataclass
+class ArbSnapshot:
+    """
+    Snapshot of market state at first detection.
+
+    Used as baseline (P0, Quote0) for term structure comparison.
+    """
+    market_id: str
+    news_id: str
+    first_seen_ts: str
+
+    # Initial probability
+    p0: float
+
+    # Initial quote
+    quote0: Optional[dict] = None  # PolymarketQuote.to_dict()
+
+    # Initial volume (for detecting activity changes)
+    volume0: Optional[float] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ArbSnapshot":
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
+class ArbOpportunityLeg:
+    """
+    Single leg of an arbitrage opportunity.
+    """
+    market_id: str
+    question: str
+    tenor_days: int
+    side: str  # "SHORT_LEG" | "LONG_LEG"
+    current_mid: float
+    delta: float  # current_mid - p0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ArbOpportunity:
+    """
+    Detected arbitrage opportunity.
+
+    Term structure arbitrage: same event, different tenors,
+    delta divergence exceeds threshold.
+    """
+    id: str
+    timestamp: str
+    type: str  # "TERM_STRUCTURE"
+    event_id: str
+
+    # Legs
+    legs: list[dict] = field(default_factory=list)  # ArbOpportunityLeg.to_dict()
+
+    # Metrics
+    delta_diff: float = 0.0      # abs(delta_short - delta_long)
+    edge: float = 0.0            # delta_diff - estimated_costs
+    confidence: float = 0.0      # 0-1 based on liquidity
+
+    # Evidence for analysis
+    evidence: dict = field(default_factory=dict)
+
+    # Risk assessment
+    risk_flags: list[str] = field(default_factory=list)
+    status: str = "CANDIDATE"  # CANDIDATE | FILTERED | CONFIRMED
+
+    # Agent explanation (optional)
+    agent_note: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ArbOpportunity":
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
