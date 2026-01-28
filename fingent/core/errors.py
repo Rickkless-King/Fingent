@@ -83,6 +83,14 @@ class RateLimitError(ProviderError):
         self.retry_after = retry_after
 
 
+class QuotaExceededError(ProviderError):
+    """Internal quota exceeded (configured budget)."""
+
+    def __init__(self, message: str, *, provider: str, **kwargs):
+        super().__init__(message, provider=provider, recoverable=True, **kwargs)
+        self.code = "QUOTA_EXCEEDED"
+
+
 class AuthenticationError(ProviderError):
     """API authentication failed."""
 

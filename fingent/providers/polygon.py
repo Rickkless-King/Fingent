@@ -112,6 +112,7 @@ class PolygonProvider(BaseProvider):
         start_time = time.time()
 
         try:
+            self._consume_quota()
             # Simple request to check API health
             result = self.client.get_previous_close("AAPL")
             latency = (time.time() - start_time) * 1000
@@ -150,6 +151,7 @@ class PolygonProvider(BaseProvider):
             return MarketData.from_dict(cached)
 
         try:
+            self._consume_quota()
             # Get previous close (most recent complete bar)
             result = self.client.get_previous_close(symbol)
 
@@ -253,6 +255,7 @@ class PolygonProvider(BaseProvider):
             return [PriceBar.from_dict(b) for b in cached]
 
         try:
+            self._consume_quota()
             # Use get_aggregate_bars for historical data
             bars = self.client.get_aggregate_bars(
                 symbol,

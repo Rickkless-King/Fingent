@@ -98,12 +98,14 @@ class NodeRegistry:
 
         self._nodes: Dict[str, Type] = {}
         self._node_providers: Dict[str, list[str]] = {}  # Node -> required providers
+        self._node_kwargs: Dict[str, dict[str, Any]] = {}
 
     def register(
         self,
         name: str,
         node_class: Type,
         providers: Optional[list[str]] = None,
+        default_kwargs: Optional[dict[str, Any]] = None,
     ) -> None:
         """
         Register a node class.
@@ -115,6 +117,7 @@ class NodeRegistry:
         """
         self._nodes[name] = node_class
         self._node_providers[name] = providers or []
+        self._node_kwargs[name] = default_kwargs or {}
         logger.debug(f"Registered node: {name}")
 
     def create(self, name: str, **kwargs) -> Any:
@@ -150,6 +153,7 @@ class NodeRegistry:
             "settings": self.settings,
             "config": self.config,
             **provider_kwargs,
+            **self._node_kwargs.get(name, {}),
             **kwargs,
         }
 
@@ -179,6 +183,8 @@ def create_default_registries() -> tuple[ProviderRegistry, NodeRegistry]:
         AlphaVantageProvider,
         OKXProvider,
         PolymarketProvider,
+        DBnomicsProvider,
+        PolygonProvider,
     )
     from fingent.nodes import (
         BootstrapNode,
@@ -187,6 +193,7 @@ def create_default_registries() -> tuple[ProviderRegistry, NodeRegistry]:
         NewsImpactNode,
         SynthesizeAlertNode,
     )
+    from fingent.services.llm import create_llm_service
 
     settings = get_settings()
     config = load_yaml_config()
@@ -198,13 +205,25 @@ def create_default_registries() -> tuple[ProviderRegistry, NodeRegistry]:
     provider_registry.register("alphavantage", AlphaVantageProvider)
     provider_registry.register("okx", OKXProvider)
     provider_registry.register("polymarket", PolymarketProvider)
+    provider_registry.register("dbnomics", DBnomicsProvider)
+    provider_registry.register("polygon", PolygonProvider)
 
     # Create node registry
     node_registry = NodeRegistry(settings, config, provider_registry)
     node_registry.register("bootstrap", BootstrapNode, providers=[])
     node_registry.register("macro_auditor", MacroAuditorNode, providers=["fred"])
-    node_registry.register("cross_asset", CrossAssetNode, providers=["finnhub", "okx"])
+    node_registry.register(
+        "cross_asset",
+        CrossAssetNode,
+        providers=["finnhub", "polygon", "okx"],
+    )
     node_registry.register("news_impact", NewsImpactNode, providers=["alphavantage", "finnhub"])
-    node_registry.register("synthesize_alert", SynthesizeAlertNode, providers=[])
+    llm_service = create_llm_service(settings)
+    node_registry.register(
+        "synthesize_alert",
+        SynthesizeAlertNode,
+        providers=[],
+        default_kwargs={"llm_service": llm_service},
+    )
 
     return provider_registry, node_registry

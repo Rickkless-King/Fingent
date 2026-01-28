@@ -80,6 +80,7 @@ class FREDProvider(BaseProvider):
         start_time = time.time()
 
         try:
+            self._consume_quota()
             # Fetch a simple, always-available series
             self.client.get_series("DGS10", limit=1)
             latency = (time.time() - start_time) * 1000
@@ -120,6 +121,7 @@ class FREDProvider(BaseProvider):
             return cached
 
         try:
+            self._consume_quota()
             series = self.client.get_series(
                 series_id,
                 observation_start=start_date,

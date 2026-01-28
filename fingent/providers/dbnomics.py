@@ -139,6 +139,7 @@ class DBnomicsProvider(BaseProvider):
         start_time = time.time()
 
         try:
+            self._consume_quota()
             # Fetch a simple, always-available series
             df = self.dbnomics.fetch_series("OECD/MEI/USA.CPALTT01.IXOB.M")
             if df is not None and len(df) > 0:
@@ -182,6 +183,7 @@ class DBnomicsProvider(BaseProvider):
             return cached
 
         try:
+            self._consume_quota()
             df = self.dbnomics.fetch_series(series_id)
 
             if df is None or df.empty:
@@ -279,6 +281,7 @@ class DBnomicsProvider(BaseProvider):
             List of matching series metadata
         """
         try:
+            self._consume_quota()
             # Use the search functionality
             results = self.dbnomics.fetch_series_by_api_link(
                 f"https://api.db.nomics.world/v22/series?q={query}&limit={limit}"

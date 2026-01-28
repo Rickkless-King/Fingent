@@ -15,9 +15,10 @@ from typing import Any, Optional
 
 from fingent.core.cache import CacheManager, get_provider_cache
 from fingent.core.config import Settings, get_settings
-from fingent.core.errors import ProviderError, DataNotAvailableError
+from fingent.core.errors import ProviderError, DataNotAvailableError, QuotaExceededError
 from fingent.core.http import HttpClient, get_http_client
 from fingent.core.logging import LoggerMixin
+from fingent.core.quota import get_quota_manager
 
 
 class ProviderStatus(str, Enum):
@@ -70,10 +71,11 @@ class BaseProvider(ABC, LoggerMixin):
         """
         self.settings = settings or get_settings()
         self.http = http_client or get_http_client()
-        self.cache = cache or get_provider_cache()
+        self.cache = cache or get_provider_cache(self.name)
 
         self._initialized = False
         self._last_error: Optional[Exception] = None
+        self._quota_manager = get_quota_manager()
 
     def _ensure_initialized(self) -> None:
         """Ensure provider is initialized. Override in subclass if needed."""
@@ -156,6 +158,7 @@ class BaseProvider(ABC, LoggerMixin):
         Raises:
             ProviderError: On request failure
         """
+        self._consume_quota()
         kwargs["provider_name"] = self.name
 
         try:
@@ -173,6 +176,15 @@ class BaseProvider(ABC, LoggerMixin):
                 provider=self.name,
                 recoverable=True,
             ) from e
+
+    def _consume_quota(self, cost: int = 1) -> None:
+        """Consume quota for this provider if limits are enabled."""
+        result = self._quota_manager.check_and_consume(self.name, cost=cost)
+        if not result.allowed:
+            raise QuotaExceededError(
+                f"{self.name} quota exceeded: {result.reason}",
+                provider=self.name,
+            )
 
 
 class OptionalProvider(BaseProvider):

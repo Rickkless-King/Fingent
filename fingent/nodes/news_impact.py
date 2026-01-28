@@ -34,6 +34,19 @@ class NewsImpactNode(BaseNode):
         super().__init__(*args, **kwargs)
         self.alphavantage = alphavantage_provider or AlphaVantageProvider()
         self.finnhub = finnhub_provider or FinnhubProvider()
+        self._load_news_config()
+
+    def _load_news_config(self) -> None:
+        news_cfg = self.config.get("providers", {}).get("news", {})
+        self.news_primary = news_cfg.get("primary", "alphavantage")
+        self.news_fallback = news_cfg.get("fallback", "finnhub")
+
+    def _get_news_provider(self, name: str):
+        if name == "alphavantage":
+            return self.alphavantage
+        if name == "finnhub":
+            return self.finnhub
+        return None
 
     def run(self, state: dict[str, Any]) -> dict[str, Any]:
         """
@@ -71,50 +84,71 @@ class NewsImpactNode(BaseNode):
             "summary": {},
             "source": "none",
         }
+        primary = self._get_news_provider(self.news_primary)
+        fallback = self._get_news_provider(self.news_fallback)
 
-        # Try AlphaVantage first
-        try:
-            summary = self.alphavantage.get_market_sentiment_summary()
+        # Try primary provider
+        if primary:
+            try:
+                if primary.name == "alphavantage":
+                    summary = primary.get_market_sentiment_summary()
+                    if summary.get("article_count", 0) > 0:
+                        news_data["summary"] = summary
+                        news_data["articles"] = summary.get("latest_articles", [])
+                        news_data["source"] = primary.name
+                        self.logger.info(
+                            f"Fetched {summary['article_count']} articles from AlphaVantage"
+                        )
+                        return news_data
+                elif primary.name == "finnhub":
+                    market_news = primary.get_market_news("general")
+                    if market_news:
+                        news_data["articles"] = [n.to_dict() for n in market_news[:10]]
+                        news_data["source"] = primary.name
+                        news_data["summary"] = {
+                            "article_count": len(market_news),
+                            "avg_sentiment": 0,
+                            "sentiment_distribution": {},
+                        }
+                        self.logger.info(
+                            f"Fetched {len(market_news)} articles from Finnhub"
+                        )
+                        return news_data
+            except Exception as e:
+                self.logger.warning(f"{primary.name} news failed: {e}")
+                errors.append(self.create_error(
+                    f"{primary.name} news failed: {e}",
+                    recoverable=True,
+                ))
 
-            if summary.get("article_count", 0) > 0:
-                news_data["summary"] = summary
-                news_data["articles"] = summary.get("latest_articles", [])
-                news_data["source"] = "alphavantage"
-
-                self.logger.info(
-                    f"Fetched {summary['article_count']} articles from AlphaVantage"
-                )
-                return news_data
-
-        except Exception as e:
-            self.logger.warning(f"AlphaVantage news failed: {e}")
-            errors.append(self.create_error(
-                f"AlphaVantage news failed: {e}",
-                recoverable=True,
-            ))
-
-        # Fallback to Finnhub
-        try:
-            market_news = self.finnhub.get_market_news("general")
-
-            if market_news:
-                news_data["articles"] = [n.to_dict() for n in market_news[:10]]
-                news_data["source"] = "finnhub"
-
-                # Simple sentiment summary (no scores from Finnhub)
-                news_data["summary"] = {
-                    "article_count": len(market_news),
-                    "avg_sentiment": 0,  # Finnhub doesn't provide sentiment
-                    "sentiment_distribution": {},
-                }
-
-                self.logger.info(
-                    f"Fetched {len(market_news)} articles from Finnhub (fallback)"
-                )
-
-        except Exception as e:
-            self.logger.error(f"Finnhub news failed: {e}")
-            errors.append(self.create_error(f"Finnhub news failed: {e}"))
+        # Fallback provider
+        if fallback:
+            try:
+                if fallback.name == "finnhub":
+                    market_news = fallback.get_market_news("general")
+                    if market_news:
+                        news_data["articles"] = [n.to_dict() for n in market_news[:10]]
+                        news_data["source"] = fallback.name
+                        news_data["summary"] = {
+                            "article_count": len(market_news),
+                            "avg_sentiment": 0,
+                            "sentiment_distribution": {},
+                        }
+                        self.logger.info(
+                            f"Fetched {len(market_news)} articles from Finnhub (fallback)"
+                        )
+                elif fallback.name == "alphavantage":
+                    summary = fallback.get_market_sentiment_summary()
+                    if summary.get("article_count", 0) > 0:
+                        news_data["summary"] = summary
+                        news_data["articles"] = summary.get("latest_articles", [])
+                        news_data["source"] = fallback.name
+                        self.logger.info(
+                            f"Fetched {summary['article_count']} articles from AlphaVantage (fallback)"
+                        )
+            except Exception as e:
+                self.logger.error(f"{fallback.name} news failed: {e}")
+                errors.append(self.create_error(f"{fallback.name} news failed: {e}"))
 
         return news_data
 

@@ -13,7 +13,7 @@ providers:
   quote:
     us_equity: finnhub      # 美股行情
     crypto: okx             # 加密货币
-    fallback: yfinance      # 备用
+    fallback: polygon       # 备用（免费额度模式）
 
   # 新闻数据源优先级
   news:
@@ -23,11 +23,38 @@ providers:
   # 宏观数据
   macro:
     primary: fred
+    fallback: dbnomics
 
   # 情绪数据 (可选)
   sentiment:
     polymarket:
       enabled: false        # 默认关闭，需手动启用
+
+# ==============================================
+# 运行模式与免费额度配置
+# ==============================================
+usage_mode:
+  name: free
+  enabled: true
+
+  # API 调用预算（免费额度）
+  quotas:
+    finnhub:
+      per_minute: 60
+    alphavantage:
+      per_day: 25
+    polygon:
+      per_minute: 5
+
+  # 缓存策略（秒）
+  cache_ttl:
+    default: 1800
+    providers:
+      finnhub: 300
+      alphavantage: 86400
+      polygon: 86400
+      fred: 21600
+      dbnomics: 21600
 
 # ==============================================
 # 监控资产列表

@@ -67,6 +67,7 @@ class OKXProvider(BaseProvider):
         start_time = time.time()
 
         try:
+            self._consume_quota()
             # Fetch ticker as health check
             self.exchange.fetch_ticker("BTC/USDT")
             latency = (time.time() - start_time) * 1000
@@ -101,6 +102,7 @@ class OKXProvider(BaseProvider):
             return MarketData.from_dict(cached)
 
         try:
+            self._consume_quota()
             ticker = self.exchange.fetch_ticker(symbol)
 
             if not ticker:
@@ -180,6 +182,7 @@ class OKXProvider(BaseProvider):
             return [PriceBar.from_dict(c) for c in cached]
 
         try:
+            self._consume_quota()
             ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
 
             result = []

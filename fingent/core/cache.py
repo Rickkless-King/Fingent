@@ -12,7 +12,7 @@ from typing import Any, Callable, Optional
 
 from cachetools import TTLCache
 
-from fingent.core.config import get_settings
+from fingent.core.config import get_settings, load_yaml_config
 from fingent.core.logging import get_logger
 
 logger = get_logger("cache")
@@ -126,16 +126,40 @@ def cached(
 
 # Global cache instances for different purposes
 _provider_cache: Optional[CacheManager] = None
+_provider_caches: dict[str, CacheManager] = {}
 _llm_cache: Optional[CacheManager] = None
 
 
-def get_provider_cache() -> CacheManager:
-    """Get cache for provider API responses."""
+def _get_provider_ttl(provider_name: Optional[str]) -> int:
+    settings = get_settings()
+    config = load_yaml_config()
+    usage_mode = config.get("usage_mode", {})
+    cache_cfg = usage_mode.get("cache_ttl", {})
+    default_ttl = cache_cfg.get("default", settings.cache_ttl)
+    if provider_name:
+        provider_ttl = cache_cfg.get("providers", {}).get(provider_name)
+        if provider_ttl:
+            return int(provider_ttl)
+    return int(default_ttl)
+
+
+def get_provider_cache(provider_name: Optional[str] = None) -> CacheManager:
+    """Get cache for provider API responses (supports per-provider TTL)."""
     global _provider_cache
-    if _provider_cache is None:
-        settings = get_settings()
-        _provider_cache = CacheManager(maxsize=500, ttl=settings.cache_ttl)
-    return _provider_cache
+    if not provider_name:
+        if _provider_cache is None:
+            settings = get_settings()
+            _provider_cache = CacheManager(maxsize=500, ttl=settings.cache_ttl)
+        return _provider_cache
+
+    ttl = _get_provider_ttl(provider_name)
+    existing = _provider_caches.get(provider_name)
+    if existing and existing.ttl == ttl:
+        return existing
+
+    cache = CacheManager(maxsize=500, ttl=ttl)
+    _provider_caches[provider_name] = cache
+    return cache
 
 
 def get_llm_cache() -> CacheManager:

@@ -57,6 +57,7 @@ class FinnhubProvider(BaseProvider):
         start_time = time.time()
 
         try:
+            self._consume_quota()
             # Simple quote request
             self.client.quote("AAPL")
             latency = (time.time() - start_time) * 1000
@@ -88,6 +89,7 @@ class FinnhubProvider(BaseProvider):
             return MarketData.from_dict(cached)
 
         try:
+            self._consume_quota()
             quote = self.client.quote(symbol)
 
             if not quote or quote.get("c", 0) == 0:
@@ -164,6 +166,7 @@ class FinnhubProvider(BaseProvider):
             return [PriceBar.from_dict(c) for c in cached]
 
         try:
+            self._consume_quota()
             candles = self.client.stock_candles(
                 symbol,
                 resolution,
@@ -223,6 +226,7 @@ class FinnhubProvider(BaseProvider):
             return [NewsItem.from_dict(n) for n in cached]
 
         try:
+            self._consume_quota()
             news = self.client.company_news(symbol, from_date, to_date)
 
             result = []
@@ -263,6 +267,7 @@ class FinnhubProvider(BaseProvider):
             return [NewsItem.from_dict(n) for n in cached]
 
         try:
+            self._consume_quota()
             news = self.client.general_news(category)
 
             result = []

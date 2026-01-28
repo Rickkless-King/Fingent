@@ -259,6 +259,9 @@ def generate_report_summary(
     llm: LLMService,
     signals_summary: dict[str, Any],
     alerts: list[dict[str, Any]],
+    *,
+    temperature: float = 0.3,
+    max_tokens: int = 2000,
 ) -> str:
     """
     Generate report summary using LLM.
@@ -288,4 +291,9 @@ def generate_report_summary(
         alerts=alerts_text,
     )
 
-    return llm.generate(prompt, system_prompt=SYSTEM_PROMPT)
+    return llm.generate(
+        prompt,
+        system_prompt=SYSTEM_PROMPT,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )

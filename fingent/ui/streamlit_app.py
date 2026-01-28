@@ -9,7 +9,7 @@ import pandas as pd
 from datetime import datetime
 
 # Import Fingent modules
-from fingent.core.config import get_settings
+from fingent.core.config import get_settings, load_yaml_config
 from fingent.services.persistence import create_persistence_service
 from fingent.graph.builder import run_workflow, create_default_workflow
 from fingent.graph.state import create_initial_state
@@ -42,6 +42,18 @@ def main():
         settings = get_settings()
         st.text(f"Environment: {settings.fingent_env}")
         st.text(f"Timezone: {settings.timezone}")
+
+        st.divider()
+        st.header("Usage Mode")
+        config = load_yaml_config()
+        usage = config.get("usage_mode", {})
+        st.text(f"Mode: {usage.get('name', 'default')}")
+        st.text(f"Enabled: {usage.get('enabled', False)}")
+        quotas = usage.get("quotas", {})
+        if quotas:
+            st.caption("Quotas")
+            for provider, limit in quotas.items():
+                st.text(f"{provider}: {limit}")
 
     # Main content
     persistence = create_persistence_service()
@@ -118,6 +130,24 @@ def show_latest_report(persistence):
         st.header("Summary")
         st.markdown(report["summary"])
 
+    # Trend charts from history
+    history_df = build_history_df(persistence, limit=20)
+    if not history_df.empty:
+        st.header("Trends")
+        chart_cols = st.columns(2)
+        with chart_cols[0]:
+            st.subheader("Signals & Alerts")
+            st.line_chart(
+                history_df.set_index("timestamp")[["signals", "alerts"]],
+                use_container_width=True,
+            )
+        with chart_cols[1]:
+            st.subheader("Overall Score")
+            st.line_chart(
+                history_df.set_index("timestamp")[["overall_score"]],
+                use_container_width=True,
+            )
+
     # Two columns: Signals and Alerts
     col1, col2 = st.columns(2)
 
@@ -145,6 +175,37 @@ def show_latest_report(persistence):
         else:
             st.success("No alerts triggered")
 
+    # Report sections
+    sections = report.get("sections", [])
+    if sections:
+        st.header("Report Sections")
+        for section in sections:
+            st.subheader(section.get("title", "Section"))
+            if section.get("content"):
+                st.write(section["content"])
+            key_points = section.get("key_points", [])
+            if key_points:
+                st.markdown("\n".join([f"- {p}" for p in key_points]))
+
+    # News list
+    news_data = latest.get("news_data", {})
+    articles = news_data.get("articles", [])
+    if articles:
+        st.header("News")
+        for article in articles:
+            title = article.get("title", "Untitled")
+            url = article.get("url")
+            source = article.get("source", "unknown")
+            published_at = article.get("published_at", "")
+            summary = article.get("summary", "")
+            with st.expander(f"{title} ({source})"):
+                if url:
+                    st.markdown(f"[Link]({url})")
+                if published_at:
+                    st.caption(f"Published: {published_at}")
+                if summary:
+                    st.write(summary)
+
     # Errors
     if errors:
         st.header("Errors")
@@ -166,6 +227,14 @@ def show_history(persistence):
     df["timestamp"] = pd.to_datetime(df["timestamp"])
 
     st.dataframe(df, use_container_width=True)
+
+    st.subheader("History Trends")
+    history_df = build_history_df(persistence, limit=20)
+    if not history_df.empty:
+        st.line_chart(
+            history_df.set_index("timestamp")[["signals", "alerts", "overall_score"]],
+            use_container_width=True,
+        )
 
     # Select a run to view
     selected_run = st.selectbox(
@@ -202,6 +271,28 @@ def show_raw_data(persistence):
 
     with tab4:
         st.json(latest)
+
+
+def build_history_df(persistence, limit: int = 20) -> pd.DataFrame:
+    snapshots = persistence.list_snapshots(limit=limit)
+    rows = []
+    for item in snapshots:
+        state = persistence.load_snapshot(item["run_id"])
+        report = (state or {}).get("report", {})
+        summary = report.get("signals_summary", {})
+        rows.append({
+            "timestamp": item["timestamp"],
+            "signals": item.get("signal_count", 0),
+            "alerts": item.get("alert_count", 0),
+            "overall_score": summary.get("overall_score", 0),
+            "direction": summary.get("overall_direction", "neutral"),
+        })
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df = df.sort_values("timestamp")
+    return df
 
 
 if __name__ == "__main__":

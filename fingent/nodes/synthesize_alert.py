@@ -15,6 +15,7 @@ from fingent.domain.alerts import AlertRuleEngine, AlertSeverity, create_alert
 from fingent.domain.report import create_report
 from fingent.domain.signals import aggregate_signals
 from fingent.nodes.base import BaseNode
+from fingent.services.llm import generate_report_summary
 
 
 class SynthesizeAlertNode(BaseNode):
@@ -275,8 +276,21 @@ class SynthesizeAlertNode(BaseNode):
         If LLM is available, use it for natural language summary.
         Otherwise, generate structured text summary.
         """
-        # TODO: Integrate LLM for better summaries
-        # For now, generate structured summary
+        llm_config = self.config.get("llm", {})
+        if self.llm and llm_config.get("enabled", False):
+            try:
+                primary = llm_config.get("primary", {})
+                temperature = primary.get("temperature", 0.3)
+                max_tokens = primary.get("max_tokens", 2000)
+                return generate_report_summary(
+                    self.llm,
+                    signals_summary,
+                    alerts,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+            except Exception as e:
+                self.logger.warning(f"LLM summary failed, fallback to structured: {e}")
 
         direction = signals_summary.get("overall_direction", "neutral")
         score = signals_summary.get("overall_score", 0)

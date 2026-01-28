@@ -12,6 +12,7 @@ from fingent.domain.signals import SignalDirection, SignalName, create_signal
 from fingent.nodes.base import BaseNode
 from fingent.providers.finnhub import FinnhubProvider
 from fingent.providers.okx import OKXProvider
+from fingent.providers.polygon import PolygonProvider
 
 
 class CrossAssetNode(BaseNode):
@@ -27,7 +28,7 @@ class CrossAssetNode(BaseNode):
 
     node_name = "cross_asset"
 
-    # Asset symbols to track
+    # Asset symbols to track (defaults)
     US_EQUITY_SYMBOLS = ["SPY", "QQQ"]
     SAFE_HAVEN_SYMBOLS = ["GLD", "TLT"]
     CRYPTO_SYMBOLS = ["BTC-USDT", "ETH-USDT"]
@@ -36,12 +37,40 @@ class CrossAssetNode(BaseNode):
         self,
         *args,
         finnhub_provider: Optional[FinnhubProvider] = None,
+        polygon_provider: Optional[PolygonProvider] = None,
         okx_provider: Optional[OKXProvider] = None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.finnhub = finnhub_provider or FinnhubProvider()
+        self.polygon = polygon_provider or PolygonProvider()
         self.okx = okx_provider or OKXProvider()
+        self._load_asset_config()
+        self._load_quote_config()
+
+    def _load_asset_config(self) -> None:
+        assets_cfg = self.config.get("assets", {})
+        us_equity = assets_cfg.get("us_equity") or []
+        crypto = assets_cfg.get("crypto") or []
+
+        if us_equity:
+            symbols = [a.get("symbol") for a in us_equity if a.get("symbol")]
+            self.US_EQUITY_SYMBOLS = [s for s in symbols if s not in ["GLD", "TLT", "VIX"]]
+            self.SAFE_HAVEN_SYMBOLS = [s for s in symbols if s in ["GLD", "TLT"]]
+        if crypto:
+            self.CRYPTO_SYMBOLS = [a.get("symbol") for a in crypto if a.get("symbol")]
+
+    def _load_quote_config(self) -> None:
+        quote_cfg = self.config.get("providers", {}).get("quote", {})
+        self.equity_primary = quote_cfg.get("us_equity", "finnhub")
+        self.equity_fallback = quote_cfg.get("fallback")
+
+    def _get_quote_provider(self, name: Optional[str]):
+        if name == "finnhub":
+            return self.finnhub
+        if name == "polygon":
+            return self.polygon
+        return None
 
     def run(self, state: dict[str, Any]) -> dict[str, Any]:
         """
@@ -81,25 +110,33 @@ class CrossAssetNode(BaseNode):
 
         # Fetch US equity data
         try:
-            for symbol in self.US_EQUITY_SYMBOLS:
-                quote = self.finnhub.get_quote(symbol)
-                if quote:
+            primary = self._get_quote_provider(self.equity_primary)
+            fallback = self._get_quote_provider(self.equity_fallback)
+
+            def fetch_with_fallback(symbol: str):
+                for provider in [primary, fallback]:
+                    if not provider:
+                        continue
+                    try:
+                        quote = provider.get_quote(symbol)
+                        if quote:
+                            return quote, provider
+                    except Exception as e:
+                        self.logger.warning(
+                            f"Quote failed ({provider.name}) {symbol}: {e}"
+                        )
+                return None, None
+
+            # Equity + safe haven symbols
+            for symbol in self.US_EQUITY_SYMBOLS + self.SAFE_HAVEN_SYMBOLS:
+                quote, provider = fetch_with_fallback(symbol)
+                if quote and provider:
                     market_data["assets"][symbol] = quote.to_dict()
+                    if hasattr(provider, "calculate_price_changes"):
+                        market_data["changes"][symbol] = provider.calculate_price_changes(symbol)
 
-                    # Get 7d change
-                    changes = self.finnhub.calculate_price_changes(symbol)
-                    market_data["changes"][symbol] = changes
-
-            # Fetch safe haven data
-            for symbol in self.SAFE_HAVEN_SYMBOLS:
-                quote = self.finnhub.get_quote(symbol)
-                if quote:
-                    market_data["assets"][symbol] = quote.to_dict()
-                    changes = self.finnhub.calculate_price_changes(symbol)
-                    market_data["changes"][symbol] = changes
-
-            # Fetch VIX
-            vix_quote = self.finnhub.get_quote("VIX")
+            # Fetch VIX (best effort)
+            vix_quote, provider = fetch_with_fallback("VIX")
             if vix_quote:
                 market_data["assets"]["VIX"] = vix_quote.to_dict()
                 market_data["vix_level"] = vix_quote.price
@@ -108,7 +145,7 @@ class CrossAssetNode(BaseNode):
 
         except Exception as e:
             self.logger.error(f"Failed to fetch equity data: {e}")
-            errors.append(self.create_error(f"Finnhub fetch failed: {e}"))
+            errors.append(self.create_error(f"Equity fetch failed: {e}"))
 
         # Fetch crypto data
         try:
