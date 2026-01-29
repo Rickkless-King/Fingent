@@ -29,6 +29,27 @@ except ImportError:
     ARB_AVAILABLE = False
 
 
+def _clear_news_cache():
+    """Clear all news-related caches to force fresh data fetch."""
+    try:
+        from fingent.core.cache import get_provider_cache
+        # Clear caches for all news providers
+        for provider in ["marketaux", "fmp", "gnews", "finnhub", "alphavantage"]:
+            try:
+                cache = get_provider_cache(provider)
+                cache.clear()
+            except Exception:
+                pass
+        # Also clear the news router singleton to reset stats
+        try:
+            from fingent.providers import news_router
+            news_router._news_router = None
+        except Exception:
+            pass
+    except Exception as e:
+        st.warning(f"Could not clear cache: {e}")
+
+
 def main():
     st.set_page_config(
         page_title="Fingent - Macro Analysis",
@@ -43,8 +64,14 @@ def main():
     with st.sidebar:
         st.header("Controls")
 
+        # Clear cache option
+        clear_cache = st.checkbox("Clear cache before run", value=False,
+                                   help="Force fetch fresh data, ignore cached results")
+
         if st.button("🔄 Run Analysis", type="primary"):
             with st.spinner("Running analysis..."):
+                if clear_cache:
+                    _clear_news_cache()
                 run_analysis()
             st.success("Analysis complete!")
             st.rerun()
@@ -316,7 +343,7 @@ def _render_news_compact(articles: list):
         published_at = article.get("published_at", "")
         summary = article.get("summary", "")
         url = article.get("url", "")
-        sentiment = article.get("sentiment_score", 0)
+        sentiment = article.get("sentiment_score") or 0  # Handle None values
 
         # Format time
         time_str = ""
@@ -352,9 +379,19 @@ def _render_news_compact(articles: list):
 
         # Expandable for details
         with st.expander(header_title, expanded=False):
-            # Score display
+            # Score display with method indicator
+            sentiment_display = f"{sentiment:+.2f}" if sentiment else "N/A"
+            sentiment_method = article.get("sentiment_method", "")
+            method_badge = ""
+            if sentiment_method == "source":
+                method_badge = " <small>(API)</small>"
+            elif sentiment_method == "keywords":
+                method_badge = " <small>(Keywords)</small>"
+            elif sentiment_method == "llm":
+                method_badge = " <small>(AI)</small>"
+
             st.markdown(
-                f"**Sentiment:** <span style='color:{sent_color}'>{sentiment:+.2f}</span> | "
+                f"**Sentiment:** <span style='color:{sent_color}'>{sentiment_display}</span>{method_badge} | "
                 f"**Source:** {source}",
                 unsafe_allow_html=True
             )
@@ -676,8 +713,10 @@ def show_arbitrage():
                     results = engine.run_full_pipeline(use_finnhub=True)
                     st.session_state.arb_results = results
 
+                    providers_used = results.get('news_providers_used', [])
+                    providers_str = ", ".join(providers_used) if providers_used else "finnhub"
                     st.info(
-                        f"Scanned {results.get('news_scanned', 0)} news items, "
+                        f"Scanned {results.get('news_scanned', 0)} news items from [{providers_str}], "
                         f"{results.get('news_triggered', 0)} triggered keywords"
                     )
 

@@ -14,6 +14,12 @@ from fingent.providers.polymarket import PolymarketProvider
 from fingent.providers.dbnomics import DBnomicsProvider
 from fingent.providers.polygon import PolygonProvider
 
+# News providers (for arbitrage trigger)
+from fingent.providers.marketaux import MarketauxProvider
+from fingent.providers.fmp import FMPProvider
+from fingent.providers.gnews import GNewsProvider
+from fingent.providers.news_router import NewsRouter, get_news_router
+
 __all__ = [
     "BaseProvider",
     "ProviderStatus",
@@ -24,4 +30,10 @@ __all__ = [
     "PolymarketProvider",
     "DBnomicsProvider",
     "PolygonProvider",
+    # News providers
+    "MarketauxProvider",
+    "FMPProvider",
+    "GNewsProvider",
+    "NewsRouter",
+    "get_news_router",
 ]

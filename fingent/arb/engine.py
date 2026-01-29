@@ -73,6 +73,9 @@ class ArbEngine(LoggerMixin):
             except re.error as e:
                 self.logger.warning(f"Invalid regex pattern '{pattern}': {e}")
 
+        # Load synonym map for keyword expansion
+        self.synonym_map = config.get("synonym_map", {})
+
         # Initialize provider
         self.provider = provider or PolymarketProvider()
 
@@ -144,6 +147,7 @@ class ArbEngine(LoggerMixin):
             keywords=keywords,
             min_volume=min_volume,
             min_markets_per_event=2,
+            synonym_map=self.synonym_map,
         )
 
     def create_snapshots(
@@ -408,8 +412,60 @@ class ArbEngine(LoggerMixin):
         return len(to_remove)
 
     # ==============================================
-    # Finnhub News Integration
+    # News Integration (Multi-provider with fallback)
     # ==============================================
+
+    def scan_news(self) -> list[ArbOpportunity]:
+        """
+        Scan news from multiple providers and trigger arbitrage detection.
+
+        Uses NewsRouter for intelligent provider selection with fallback.
+
+        Returns:
+            List of confirmed opportunities across all triggered news
+        """
+        if not self.enabled:
+            self.logger.warning("Arbitrage engine is disabled")
+            return []
+
+        try:
+            from fingent.providers.news_router import get_news_router
+            news_router = get_news_router()
+        except Exception as e:
+            self.logger.error(f"Failed to initialize NewsRouter: {e}")
+            # Fallback to Finnhub only
+            return self.scan_finnhub_news()
+
+        # Fetch news from best available provider
+        self.logger.info("Fetching news from available providers...")
+        news_items = news_router.get_market_news(limit=30)
+
+        if not news_items:
+            self.logger.info("No news items found from any provider")
+            return []
+
+        self.logger.info(f"Processing {len(news_items)} news items...")
+
+        all_opportunities = []
+        triggered_count = 0
+
+        for item in news_items:
+            opportunities = self.process_news(
+                headline=item.title,
+                summary=item.summary,
+                news_id=item.url or item.title[:50],
+            )
+
+            if opportunities:
+                triggered_count += 1
+                all_opportunities.extend(opportunities)
+
+        self.logger.info(
+            f"News scan complete: {triggered_count} triggered, "
+            f"{len(all_opportunities)} opportunities found"
+        )
+
+        return all_opportunities
 
     def scan_finnhub_news(
         self,
@@ -417,9 +473,9 @@ class ArbEngine(LoggerMixin):
         category: str = "general",
     ) -> list[ArbOpportunity]:
         """
-        Scan Finnhub news and trigger arbitrage detection.
+        Scan Finnhub news only (legacy method, kept for backwards compatibility).
 
-        This is the main entry point for news-triggered arbitrage.
+        For multi-provider support, use scan_news() instead.
 
         Args:
             finnhub_provider: Finnhub provider instance (creates one if not provided)
@@ -479,7 +535,7 @@ class ArbEngine(LoggerMixin):
         """
         Run the full arbitrage pipeline.
 
-        1. Fetch news from Finnhub (optional)
+        1. Fetch news from available providers (multi-provider with fallback)
         2. Check for keyword triggers
         3. Scan Polymarket for matching events
         4. Detect term structure opportunities
@@ -487,8 +543,8 @@ class ArbEngine(LoggerMixin):
         6. Return results
 
         Args:
-            use_finnhub: Whether to use Finnhub for news trigger
-            finnhub_category: News category if using Finnhub
+            use_finnhub: Whether to use news for trigger (now uses NewsRouter)
+            finnhub_category: News category (kept for backwards compatibility)
 
         Returns:
             Pipeline result dict with stats and opportunities
@@ -498,6 +554,7 @@ class ArbEngine(LoggerMixin):
             "enabled": self.enabled,
             "news_scanned": 0,
             "news_triggered": 0,
+            "news_providers_used": [],
             "events_found": 0,
             "opportunities_raw": 0,
             "opportunities_confirmed": 0,
@@ -511,9 +568,25 @@ class ArbEngine(LoggerMixin):
 
         try:
             if use_finnhub:
-                # News-triggered scan
-                finnhub = FinnhubProvider()
-                news_items = finnhub.get_market_news(finnhub_category)
+                # Use NewsRouter for multi-provider support
+                try:
+                    from fingent.providers.news_router import get_news_router
+                    news_router = get_news_router()
+                    news_items = news_router.get_market_news(limit=30)
+
+                    # Get provider stats
+                    stats = news_router.get_stats()
+                    result["news_providers_used"] = [
+                        name for name, s in stats.items()
+                        if s.get("calls_today", 0) > 0
+                    ]
+
+                except Exception as e:
+                    self.logger.warning(f"NewsRouter failed, falling back to Finnhub: {e}")
+                    finnhub = FinnhubProvider()
+                    news_items = finnhub.get_market_news(finnhub_category)
+                    result["news_providers_used"] = ["finnhub"]
+
                 result["news_scanned"] = len(news_items)
 
                 for item in news_items:
@@ -521,7 +594,7 @@ class ArbEngine(LoggerMixin):
                     if matched:
                         result["news_triggered"] += 1
 
-                opportunities = self.scan_finnhub_news(finnhub, finnhub_category)
+                opportunities = self.scan_news()
             else:
                 # Manual scan without news trigger
                 opportunities = self.run_scan()

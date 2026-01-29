@@ -67,6 +67,13 @@ class Settings(BaseSettings):
     polygon_api_key: Optional[str] = Field(default=None, description="Polygon.io/Massive API Key")
 
     # ==============================================
+    # News API Keys (用于套利检测触发)
+    # ==============================================
+    marketaux_api_key: Optional[str] = Field(default=None, description="Marketaux API Key")
+    fmp_api_key: Optional[str] = Field(default=None, description="Financial Modeling Prep API Key")
+    gnews_api_key: Optional[str] = Field(default=None, description="GNews API Key")
+
+    # ==============================================
     # Database
     # ==============================================
     database_url: str = Field(default="sqlite:///data/fingent.db")

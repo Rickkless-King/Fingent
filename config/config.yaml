@@ -15,10 +15,35 @@ providers:
     crypto: okx             # 加密货币
     fallback: polygon       # 备用（免费额度模式）
 
-  # 新闻数据源优先级
+  # 新闻数据源优先级 (旧配置，用于基础新闻)
   news:
     primary: alphavantage
     fallback: finnhub
+
+# ==============================================
+# 新闻提供者配置 (用于套利触发)
+# ==============================================
+news_providers:
+  # 优先级顺序 (越靠前越优先)
+  priority:
+    - marketaux      # 金融新闻，有情绪分析，100次/天
+    - fmp            # 金融数据，500MB/月
+    - gnews          # 通用新闻，支持搜索，100次/天
+    - finnhub        # 已有，作为最终备用
+
+  # 每日额度限制
+  daily_limits:
+    marketaux: 100
+    fmp: 200         # 带宽限制，估算值
+    gnews: 100
+    finnhub: 1000    # 60/分钟，日限高
+
+  # 缓存 TTL (秒) - 新闻缓存时间较短以获取更新内容
+  cache_ttl:
+    marketaux: 300   # 5 分钟
+    fmp: 300         # 5 分钟
+    gnews: 300       # 5 分钟
+    finnhub: 60      # 1 分钟 (已在上面配置)
 
   # 宏观数据
   macro:
@@ -50,8 +75,8 @@ usage_mode:
   cache_ttl:
     default: 1800
     providers:
-      finnhub: 300
-      alphavantage: 86400
+      finnhub: 60          # 降低到 1 分钟，获取更新的新闻
+      alphavantage: 3600   # 降低到 1 小时
       polygon: 86400
       fred: 21600
       dbnomics: 21600
@@ -229,11 +254,43 @@ arbitrage:
 
   # 新闻触发关键词 (正则表达式)
   trigger_keywords:
+    # AI/半导体
     - "(H200|H100|B100|NVIDIA|NVDA|Blackwell|HBM)"
     - "(TSMC|SK Hynix|Samsung|semiconductor|chip)"
-    - "(Fed|CPI|inflation|rate cut|rate hike|FOMC)"
-    - "(Trump|tariff|Greenland|trade war)"
     - "(GPU|AI|artificial intelligence)"
+    # 宏观/美联储
+    - "(Fed|CPI|inflation|rate cut|rate hike|FOMC|interest rate)"
+    # 地缘政治
+    - "(Trump|tariff|Greenland|trade war)"
+    # 贵金属 - 黄金
+    - "(gold|Gold|GOLD|黄金|XAU|GLD|XAUUSD|gold price|gold futures|bullion)"
+    # 贵金属 - 白银
+    - "(silver|Silver|SILVER|白银|XAG|SLV|XAGUSD|silver price|silver futures)"
+    # 贵金属相关主题
+    - "(precious metal|safe haven|避险|central bank gold|gold reserve|金价)"
+
+  # 同义词映射 (用于扩展搜索)
+  # 格式: 标准词 -> [同义词列表]
+  synonym_map:
+    # 贵金属
+    gold: ["gold", "xau", "gld", "bullion", "gold price", "gold futures", "黄金", "金价"]
+    silver: ["silver", "xag", "slv", "silver price", "silver futures", "白银", "银价"]
+    precious_metal: ["precious metal", "贵金属", "safe haven", "避险资产"]
+    # AI/GPU
+    nvidia: ["nvidia", "nvda", "geforce", "cuda", "英伟达"]
+    gpu: ["gpu", "graphics card", "显卡", "graphic processing"]
+    ai: ["ai", "artificial intelligence", "人工智能", "machine learning", "ml"]
+    # 半导体
+    semiconductor: ["semiconductor", "chip", "芯片", "半导体", "fab", "foundry"]
+    tsmc: ["tsmc", "台积电", "taiwan semiconductor"]
+    # 宏观
+    fed: ["fed", "federal reserve", "fomc", "美联储", "联储"]
+    rate_cut: ["rate cut", "cut rate", "lower rate", "降息", "利率下调"]
+    rate_hike: ["rate hike", "raise rate", "加息", "利率上调"]
+    inflation: ["inflation", "cpi", "通胀", "物价"]
+    # 地缘
+    tariff: ["tariff", "import duty", "关税", "贸易壁垒"]
+    trade_war: ["trade war", "贸易战", "trade conflict", "贸易摩擦"]
 
   # 监控的 Polymarket 标签
   polymarket_tags:

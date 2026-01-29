@@ -361,13 +361,17 @@ class PolymarketProvider(OptionalProvider):
         self,
         keywords: list[str],
         limit: int = 20,
+        synonym_map: Optional[dict[str, list[str]]] = None,
     ) -> list[PolymarketMarket]:
         """
         Search markets by keywords (for arbitrage trigger).
 
+        Supports synonym expansion for better matching.
+
         Args:
             keywords: List of keywords to search
             limit: Max results per keyword
+            synonym_map: Optional synonym mapping for keyword expansion
 
         Returns:
             List of matching PolymarketMarket objects
@@ -375,35 +379,110 @@ class PolymarketProvider(OptionalProvider):
         if not self.is_enabled:
             return []
 
+        # Expand keywords using synonym map
+        expanded_keywords = self._expand_keywords(keywords, synonym_map)
+        self.logger.debug(f"Expanded {len(keywords)} keywords to {len(expanded_keywords)}")
+
         all_markets = []
         seen_ids = set()
 
-        for keyword in keywords:
-            try:
-                response = self._make_request(
-                    "get",
-                    f"{self.BASE_URL}/markets",
-                    params={
-                        "limit": limit,
-                        "active": "true",
-                    },
-                )
+        try:
+            # Fetch markets once (more efficient)
+            response = self._make_request(
+                "get",
+                f"{self.BASE_URL}/markets",
+                params={
+                    "limit": min(limit * len(expanded_keywords), 100),
+                    "active": "true",
+                },
+            )
 
-                for item in (response if isinstance(response, list) else []):
-                    # Filter by keyword in question
-                    question = item.get("question", "").lower()
-                    if keyword.lower() in question:
-                        market_id = item.get("id", "")
-                        if market_id and market_id not in seen_ids:
-                            market = self._parse_market(item)
-                            if market:
-                                all_markets.append(market)
-                                seen_ids.add(market_id)
+            for item in (response if isinstance(response, list) else []):
+                question = item.get("question", "").lower()
+                description = item.get("description", "").lower()
+                search_text = f"{question} {description}"
 
-            except Exception as e:
-                self.logger.warning(f"Failed to search markets for '{keyword}': {e}")
+                # Check if any expanded keyword matches
+                if self._match_keywords(search_text, expanded_keywords):
+                    market_id = item.get("id", "")
+                    if market_id and market_id not in seen_ids:
+                        market = self._parse_market(item)
+                        if market:
+                            all_markets.append(market)
+                            seen_ids.add(market_id)
 
+        except Exception as e:
+            self.logger.warning(f"Failed to search markets: {e}")
+
+        self.logger.info(f"Found {len(all_markets)} markets matching keywords")
         return all_markets
+
+    def _expand_keywords(
+        self,
+        keywords: list[str],
+        synonym_map: Optional[dict[str, list[str]]] = None,
+    ) -> set[str]:
+        """
+        Expand keywords using synonym mapping.
+
+        Args:
+            keywords: Original keywords
+            synonym_map: Mapping of canonical terms to synonyms
+
+        Returns:
+            Expanded set of keywords (all lowercase)
+        """
+        expanded = set()
+
+        for kw in keywords:
+            kw_lower = kw.lower().strip()
+            if not kw_lower:
+                continue
+
+            # Add original keyword
+            expanded.add(kw_lower)
+
+            # Check if keyword matches any synonym group
+            if synonym_map:
+                for canonical, synonyms in synonym_map.items():
+                    synonyms_lower = [s.lower() for s in synonyms]
+                    # If keyword is in this synonym group, add all synonyms
+                    if kw_lower in synonyms_lower or kw_lower == canonical.lower():
+                        expanded.update(synonyms_lower)
+
+        return expanded
+
+    def _match_keywords(
+        self,
+        text: str,
+        keywords: set[str],
+    ) -> bool:
+        """
+        Check if text matches any of the keywords.
+
+        Uses word boundary matching for better accuracy.
+
+        Args:
+            text: Text to search in (should be lowercase)
+            keywords: Set of keywords to match (all lowercase)
+
+        Returns:
+            True if any keyword matches
+        """
+        for keyword in keywords:
+            # Simple substring match for multi-word keywords
+            if " " in keyword:
+                if keyword in text:
+                    return True
+            else:
+                # Word boundary match for single words
+                # This prevents "chip" matching "microchip" unless intended
+                import re
+                pattern = rf'\b{re.escape(keyword)}\b'
+                if re.search(pattern, text):
+                    return True
+
+        return False
 
     def _parse_market(
         self,
@@ -544,6 +623,7 @@ class PolymarketProvider(OptionalProvider):
         keywords: list[str],
         min_volume: float = 1000,
         min_markets_per_event: int = 2,
+        synonym_map: Optional[dict[str, list[str]]] = None,
     ) -> dict[str, list[PolymarketMarket]]:
         """
         Get markets grouped by event for arbitrage detection.
@@ -554,6 +634,7 @@ class PolymarketProvider(OptionalProvider):
             keywords: Keywords to search
             min_volume: Minimum volume filter
             min_markets_per_event: Minimum markets in event
+            synonym_map: Optional synonym mapping for keyword expansion
 
         Returns:
             Dict mapping event_id -> list of markets
@@ -561,8 +642,8 @@ class PolymarketProvider(OptionalProvider):
         if not self.is_enabled:
             return {}
 
-        # Search for markets
-        all_markets = self.search_markets_by_keyword(keywords)
+        # Search for markets with synonym expansion
+        all_markets = self.search_markets_by_keyword(keywords, synonym_map=synonym_map)
 
         # Group by event_id
         by_event: dict[str, list[PolymarketMarket]] = {}
