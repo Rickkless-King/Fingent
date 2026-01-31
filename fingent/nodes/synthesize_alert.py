@@ -16,6 +16,7 @@ from fingent.domain.report import create_report
 from fingent.domain.signals import aggregate_signals
 from fingent.nodes.base import BaseNode
 from fingent.services.llm import generate_report_summary
+from fingent.services.market_direction import calculate_market_direction
 
 
 class SynthesizeAlertNode(BaseNode):
@@ -53,10 +54,26 @@ class SynthesizeAlertNode(BaseNode):
 
         # Get all signals from state
         signals = state.get("signals", [])
+        market_data = state.get("market_data", {})
         self.logger.info(f"Synthesizing {len(signals)} signals")
 
-        # Aggregate signals
+        # Calculate market direction using the new weighted approach
+        # This uses actual market data as the primary factor, not news sentiment
+        direction_result = calculate_market_direction(signals, market_data)
+        self.logger.info(
+            f"Market direction: {direction_result['direction']} "
+            f"(score: {direction_result['score']}, driver: {direction_result['primary_driver']})"
+        )
+
+        # Build signals_summary with the new direction
         signals_summary = aggregate_signals(signals)
+        # Override with the new market-data-based direction
+        signals_summary["overall_direction"] = direction_result["direction"]
+        signals_summary["overall_score"] = direction_result["score"]
+        signals_summary["direction_confidence"] = direction_result["confidence"]
+        signals_summary["direction_components"] = direction_result["components"]
+        signals_summary["direction_driver"] = direction_result["primary_driver"]
+        signals_summary["direction_explanation"] = direction_result["explanation"]
 
         # Extract metrics for alert evaluation
         metrics = self._extract_metrics(state)

@@ -204,8 +204,10 @@ def show_latest_report(persistence):
 
     with col1:
         direction_emoji = {
+            "strong_bullish": "🟢",
             "bullish": "🟢",
             "bearish": "🔴",
+            "strong_bearish": "🔴",
             "neutral": "⚪",
             "hawkish": "🦅",
             "dovish": "🕊️",
@@ -221,6 +223,48 @@ def show_latest_report(persistence):
 
     with col4:
         st.metric("Errors", len(errors))
+
+    # Show direction breakdown if available
+    direction_driver = signals_summary.get("direction_driver", "")
+    direction_components = signals_summary.get("direction_components", {})
+
+    if direction_driver or direction_components:
+        with st.expander("📊 Direction Breakdown", expanded=False):
+            # Driver explanation
+            driver_text = {
+                "actual_market_data": "实际市场数据（S&P 500、VIX 等价格变动）",
+                "cross_asset": "跨资产分析（股票、加密货币、避险资产联动）",
+                "macro_auditor": "宏观经济指标（利率、通胀、就业）",
+                "news_impact": "新闻情绪分析",
+            }.get(direction_driver, direction_driver)
+
+            st.markdown(f"**主要驱动因素**: {driver_text}")
+
+            # Component breakdown
+            if direction_components:
+                st.markdown("**各因素贡献**:")
+                for name, value in sorted(direction_components.items(), key=lambda x: abs(x[1]), reverse=True):
+                    if abs(value) > 0.01:
+                        # Color based on value
+                        if value > 0.2:
+                            color = "green"
+                        elif value < -0.2:
+                            color = "red"
+                        else:
+                            color = "gray"
+
+                        name_text = {
+                            "cross_asset": "跨资产分析",
+                            "macro_auditor": "宏观经济",
+                            "news_impact": "新闻情绪",
+                            "market_data_direct": "实际市场数据",
+                        }.get(name, name)
+
+                        st.markdown(f"- {name_text}: <span style='color:{color}'>{value:+.2f}</span>", unsafe_allow_html=True)
+
+            # Confidence
+            confidence = signals_summary.get("direction_confidence", 0)
+            st.markdown(f"**置信度**: {confidence*100:.0f}%")
 
     # ============================================
     # Section 3: News (compact list - title + time + score)
@@ -380,8 +424,13 @@ def _render_news_compact(articles: list):
         # Expandable for details
         with st.expander(header_title, expanded=False):
             # Score display with method indicator
-            sentiment_display = f"{sentiment:+.2f}" if sentiment else "N/A"
+            # Show N/A only if sentiment_method is missing (not analyzed)
             sentiment_method = article.get("sentiment_method", "")
+            if sentiment_method:
+                sentiment_display = f"{sentiment:+.2f}"
+            else:
+                sentiment_display = "N/A"
+
             method_badge = ""
             if sentiment_method == "source":
                 method_badge = " <small>(API)</small>"
@@ -389,6 +438,8 @@ def _render_news_compact(articles: list):
                 method_badge = " <small>(Keywords)</small>"
             elif sentiment_method == "llm":
                 method_badge = " <small>(AI)</small>"
+            elif sentiment_method == "default":
+                method_badge = " <small>(Default)</small>"
 
             st.markdown(
                 f"**Sentiment:** <span style='color:{sent_color}'>{sentiment_display}</span>{method_badge} | "

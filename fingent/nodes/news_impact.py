@@ -96,6 +96,29 @@ class NewsImpactNode(BaseNode):
             self.logger.warning(f"SentimentAnalyzer not available: {e}")
             return None
 
+    def _get_search_keywords(self) -> list[str]:
+        """Get financial keywords to search for relevant news."""
+        # Get from config or use defaults
+        arb_config = self.config.get("arbitrage", {})
+        synonym_map = arb_config.get("synonym_map", {})
+
+        # Core financial keywords for market-relevant news
+        keywords = [
+            # Precious metals (hot topic)
+            "gold", "silver", "XAU", "XAG", "precious metals",
+            # Central bank / Fed
+            "Fed", "Federal Reserve", "FOMC", "interest rate", "rate cut", "rate hike",
+            # Major market movers
+            "S&P 500", "Nasdaq", "Dow Jones", "stock market",
+            "Bitcoin", "BTC", "crypto",
+            # Geopolitical
+            "Trump", "tariff", "trade war",
+            # Tech
+            "NVIDIA", "AI", "semiconductor",
+        ]
+
+        return keywords
+
     def _fetch_news_data(self, errors: list) -> dict[str, Any]:
         """Fetch news using NewsRouter (multi-provider with fallback)."""
         news_data = {
@@ -109,7 +132,14 @@ class NewsImpactNode(BaseNode):
         news_router = self._get_news_router()
         if news_router:
             try:
-                news_items = news_router.get_market_news(limit=20)
+                # First try to search for relevant financial keywords
+                keywords = self._get_search_keywords()
+                news_items = news_router.search_news(keywords=keywords[:5], limit=20)
+
+                # If search returns nothing, fall back to general market news
+                if not news_items:
+                    self.logger.info("Keyword search returned no results, trying general news")
+                    news_items = news_router.get_market_news(limit=20)
                 if news_items:
                     # Convert NewsItem to dict format
                     articles = [item.to_dict() for item in news_items]
@@ -327,6 +357,7 @@ class NewsImpactNode(BaseNode):
             "avg_sentiment": avg_sentiment,
             "article_count": article_count,
             "source": source,
+            "note": "News sentiment is supplementary, not primary direction driver",
         }
 
         # Thresholds from config
@@ -334,8 +365,11 @@ class NewsImpactNode(BaseNode):
         bullish_threshold = thresholds.get("bullish_threshold", 0.15)
         bearish_threshold = thresholds.get("bearish_threshold", -0.15)
 
-        # Confidence based on article count + boost
-        confidence = min(0.4 + (article_count / 50) + confidence_boost, 0.85)
+        # REDUCED confidence for news signals
+        # News sentiment should NOT be the primary driver of market direction
+        # Base confidence is now lower (0.25 instead of 0.4)
+        # Max confidence capped at 0.5 instead of 0.85
+        confidence = min(0.25 + (article_count / 100) + confidence_boost, 0.5)
 
         if avg_sentiment >= bullish_threshold:
             return create_signal(

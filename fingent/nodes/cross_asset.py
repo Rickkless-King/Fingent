@@ -135,11 +135,22 @@ class CrossAssetNode(BaseNode):
                     if hasattr(provider, "calculate_price_changes"):
                         market_data["changes"][symbol] = provider.calculate_price_changes(symbol)
 
-            # Fetch VIX (best effort)
+            # Fetch VIX (best effort) - try Finnhub first, then yfinance
             vix_quote, provider = fetch_with_fallback("VIX")
             if vix_quote:
                 market_data["assets"]["VIX"] = vix_quote.to_dict()
                 market_data["vix_level"] = vix_quote.price
+            else:
+                # Fallback: try yfinance for VIX
+                try:
+                    import yfinance as yf
+                    vix_ticker = yf.Ticker("^VIX")
+                    vix_info = vix_ticker.fast_info
+                    if hasattr(vix_info, 'last_price') and vix_info.last_price:
+                        market_data["vix_level"] = vix_info.last_price
+                        self.logger.info(f"Got VIX from yfinance: {vix_info.last_price:.2f}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to get VIX from yfinance: {e}")
 
             self.logger.info(f"Fetched {len(market_data['assets'])} equity quotes")
 

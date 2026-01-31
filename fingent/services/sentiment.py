@@ -32,21 +32,40 @@ class SentimentResult:
 
 # Keyword-based sentiment rules
 BULLISH_KEYWORDS = [
-    # English
+    # English - General
     "surge", "soar", "jump", "rally", "gain", "rise", "climb", "record high",
     "beat", "exceed", "outperform", "upgrade", "bullish", "optimistic",
-    "growth", "profit", "revenue up", "strong earnings", "buy",
+    "growth", "profit", "revenue up", "strong earnings", "buy", "rebound",
+    "breakthrough", "hits high", "all-time high", "best", "boom",
+    # Precious metals
+    "gold rises", "silver rises", "precious metals gain", "safe haven demand",
+    # Fed/Policy
+    "rate cut", "dovish", "easing", "stimulus", "quantitative easing",
+    # Market
+    "stocks gain", "market rises", "investors optimistic",
     # Chinese
     "上涨", "飙升", "突破", "利好", "看涨", "牛市", "增长", "盈利",
+    "反弹", "创新高", "大涨",
 ]
 
 BEARISH_KEYWORDS = [
-    # English
+    # English - General
     "plunge", "crash", "tumble", "drop", "fall", "decline", "slump", "sink",
     "miss", "disappoint", "downgrade", "bearish", "pessimistic", "warning",
     "loss", "cut", "layoff", "recession", "sell", "fear", "concern",
+    "collapse", "worst", "crisis", "default", "bankrupt", "shutdown",
+    # Precious metals
+    "gold falls", "silver falls", "gold drops", "silver drops",
+    "precious metals drop", "gold tumbles", "silver tumbles",
+    # Fed/Policy
+    "rate hike", "hawkish", "tightening", "inflation risk", "higher rates",
+    # Market
+    "stocks fall", "market drops", "investors flee", "risk off",
+    # Geopolitical
+    "tariff", "trade war", "sanctions", "government shutdown",
     # Chinese
     "下跌", "暴跌", "崩盘", "利空", "看跌", "熊市", "亏损", "裁员",
+    "危机", "恐慌", "暴跌", "大跌",
 ]
 
 
@@ -82,9 +101,9 @@ class SentimentAnalyzer(LoggerMixin):
         Returns:
             SentimentResult with score, label, confidence, method
         """
-        # 1. Check if source already provided sentiment
+        # 1. Check if source already provided valid sentiment (non-zero)
         source_score = article.get("sentiment_score")
-        if source_score is not None and source_score != 0:
+        if source_score is not None and abs(source_score) > 0.05:
             return SentimentResult(
                 score=source_score,
                 label=self._score_to_label(source_score),
@@ -92,22 +111,16 @@ class SentimentAnalyzer(LoggerMixin):
                 method="source",
             )
 
-        # 2. Try keyword-based analysis (fast, no API call)
+        # 2. Always try keyword-based analysis (fast, no API call)
         title = article.get("title", "")
         summary = article.get("summary", "")
         text = f"{title} {summary}".lower()
 
         keyword_result = self._analyze_by_keywords(text)
-        if keyword_result.score != 0:
-            return keyword_result
 
-        # 3. Default to neutral if no signals
-        return SentimentResult(
-            score=0,
-            label="neutral",
-            confidence=0.3,
-            method="default",
-        )
+        # Return keyword result even if score is 0 (neutral)
+        # This ensures we always have a method tag
+        return keyword_result
 
     def analyze_batch(
         self,
@@ -130,12 +143,18 @@ class SentimentAnalyzer(LoggerMixin):
         results = []
 
         for article in articles:
-            # Check if already has valid sentiment
-            if article.get("sentiment_score") is not None:
+            # Check if already has VALID sentiment (non-zero score from source)
+            existing_score = article.get("sentiment_score")
+            if existing_score is not None and abs(existing_score) > 0.05:
+                # Already has valid sentiment from source
+                if "sentiment_method" not in article:
+                    article["sentiment_method"] = "source"
+                    article["sentiment_label"] = self._score_to_label(existing_score)
+                    article["sentiment_confidence"] = 0.7
                 results.append(article)
                 continue
 
-            # Analyze using keywords first
+            # Analyze ALL articles without valid sentiment
             result = self.analyze_article(article)
             article["sentiment_score"] = result.score
             article["sentiment_label"] = result.label
@@ -143,7 +162,7 @@ class SentimentAnalyzer(LoggerMixin):
             article["sentiment_confidence"] = result.confidence
 
             # Collect articles that might benefit from LLM analysis
-            if result.method == "default" and use_llm:
+            if result.method == "keywords" and result.confidence < 0.3 and use_llm:
                 articles_needing_analysis.append(article)
 
             results.append(article)
