@@ -9,12 +9,16 @@ Supports:
 - CLOB API: Orderbook, quotes for arbitrage detection
 """
 
+import json
 import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+import httpx
+
 from fingent.core.errors import DataNotAvailableError, ProviderError
+from fingent.core.cache import CacheManager
 from fingent.core.timeutil import format_timestamp, now_utc
 from fingent.domain.models import (
     SentimentData,
@@ -60,6 +64,8 @@ class PolymarketProvider(OptionalProvider):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        # Short-lived cache for orderbooks
+        self._orderbook_cache = CacheManager(maxsize=200, ttl=5)
 
         # Check if enabled in settings
         if not self.settings.polymarket_enabled:
@@ -68,8 +74,10 @@ class PolymarketProvider(OptionalProvider):
     def _initialize(self) -> None:
         """Initialize Polymarket client."""
         if not self.settings.polymarket_api_key:
-            self.logger.warning("Polymarket API key not configured, disabling provider")
-            self._enabled = False
+            self.logger.warning(
+                "Polymarket API key not configured; using public Gamma/CLOB endpoints"
+            )
+            self._enabled = True
             return
 
         self.logger.info("Polymarket provider initialized (Optional)")
@@ -157,10 +165,10 @@ class PolymarketProvider(OptionalProvider):
         limit: int = 10,
     ) -> list[dict[str, Any]]:
         """
-        Search for markets by keyword.
+        Search for markets by tag slug/keyword.
 
         Args:
-            query: Search query
+            query: Tag slug or keyword
             limit: Max results
 
         Returns:
@@ -169,18 +177,27 @@ class PolymarketProvider(OptionalProvider):
         if not self.is_enabled:
             return []
 
+        tag_id = None
+        query_norm = (query or "").strip().lower()
+        if query_norm.isdigit():
+            tag_id = query_norm
+        elif query_norm:
+            tag_ids = self.resolve_tag_ids([query_norm])
+            tag_id = tag_ids[0] if tag_ids else None
+
+        params = {"limit": limit, "closed": "false"}
+        if tag_id:
+            params["tag_id"] = tag_id
+        elif query_norm:
+            params["tag_slug"] = query_norm
+
         try:
             response = self._make_request(
                 "get",
                 f"{self.BASE_URL}/markets",
-                params={
-                    "tag_slug": query.lower(),
-                    "limit": limit,
-                },
+                params=params,
             )
-
             return response if isinstance(response, list) else []
-
         except Exception as e:
             self.logger.warning(f"Failed to search markets: {e}")
             return []
@@ -263,19 +280,152 @@ class PolymarketProvider(OptionalProvider):
 
     CLOB_BASE_URL = "https://clob.polymarket.com"
 
+    def get_tags(
+        self,
+        limit: int = 200,
+        offset: Optional[int] = None,
+        order: Optional[str] = None,
+        ascending: Optional[bool] = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch tags from Gamma API."""
+        if not self.is_enabled:
+            return []
+
+        cache_key = f"tags:{limit}:{offset or 0}:{order or ''}:{ascending}"
+        cached = self._get_cached(cache_key)
+        if cached:
+            return cached
+
+        params: dict[str, Any] = {"limit": limit}
+        if offset is not None:
+            params["offset"] = offset
+        if order:
+            params["order"] = order
+        if ascending is not None:
+            params["ascending"] = str(ascending).lower()
+
+        try:
+            response = self._make_request(
+                "get",
+                f"{self.BASE_URL}/tags",
+                params=params,
+            )
+            tags = response if isinstance(response, list) else []
+            self._set_cached(cache_key, tags)
+            return tags
+        except Exception as e:
+            self.logger.warning(f"Failed to get tags: {e}")
+            return []
+
+    def resolve_tag_ids(
+        self,
+        tag_inputs: list[str],
+        limit: int = 300,
+    ) -> list[str]:
+        """Resolve tag ids from slugs/labels/keywords."""
+        if not tag_inputs:
+            return []
+
+        resolved: list[str] = []
+        seen = set()
+
+        for raw in tag_inputs:
+            if raw and raw.strip().isdigit():
+                resolved.append(raw.strip())
+                seen.add(raw.strip())
+
+        for raw in tag_inputs:
+            slug = self._normalize_tag_string(raw)
+            if not slug or slug.isdigit():
+                continue
+            tag = self.get_tag_by_slug(slug)
+            if not tag:
+                continue
+            tag_id = str(tag.get("id", "") or "").strip()
+            if tag_id and tag_id not in seen:
+                resolved.append(tag_id)
+                seen.add(tag_id)
+
+        tags = self.get_tags(limit=limit)
+        if not tags:
+            return resolved
+
+        normalized_inputs = [self._normalize_tag_string(t) for t in tag_inputs if t]
+
+        for tag in tags:
+            tag_id = str(tag.get("id", "") or "").strip()
+            if not tag_id or tag_id in seen:
+                continue
+            slug = self._normalize_tag_string(tag.get("slug"))
+            label = self._normalize_tag_string(tag.get("label") or tag.get("name"))
+
+            for needle in normalized_inputs:
+                if not needle:
+                    continue
+                if needle == slug or needle == label:
+                    resolved.append(tag_id)
+                    seen.add(tag_id)
+                    break
+                if needle in slug or needle in label:
+                    resolved.append(tag_id)
+                    seen.add(tag_id)
+                    break
+
+        return resolved
+
+    @staticmethod
+    def _normalize_tag_string(value: Optional[str]) -> str:
+        return re.sub(r"\s+", " ", (value or "").strip().lower())
+
+    def get_tag_by_slug(self, slug: str) -> Optional[dict[str, Any]]:
+        """Fetch a tag by slug via Gamma API."""
+        if not self.is_enabled:
+            return None
+
+        slug_norm = self._normalize_tag_string(slug)
+        if not slug_norm:
+            return None
+
+        cache_key = f"tag_slug:{slug_norm}"
+        cached = self._get_cached(cache_key)
+        if cached:
+            return cached
+
+        try:
+            response = self._make_request(
+                "get",
+                f"{self.BASE_URL}/tags/slug/{slug_norm}",
+            )
+            if isinstance(response, dict):
+                self._set_cached(cache_key, response)
+                return response
+        except Exception as e:
+            self.logger.warning(f"Failed to get tag by slug '{slug_norm}': {e}")
+        return None
+
     def get_events(
         self,
         tag: Optional[str] = None,
-        active: bool = True,
+        tag_id: Optional[str] = None,
+        active: Optional[bool] = True,
+        closed: Optional[bool] = False,
         limit: int = 50,
+        offset: Optional[int] = None,
+        order: Optional[str] = None,
+        ascending: Optional[bool] = None,
     ) -> list[PolymarketEvent]:
         """
         Get events from Gamma API.
 
         Args:
-            tag: Filter by tag (e.g., "fed", "ai", "politics")
-            active: Only return active events
+            tag: Tag slug/keyword (deprecated, resolves to tag_id)
+            tag_id: Tag id
+            active: Filter active events (optional)
+            closed: Filter closed events (False for open events only)
             limit: Max results
+            offset: Pagination offset
+            order: Sort field
+            ascending: Sort direction
 
         Returns:
             List of PolymarketEvent objects
@@ -283,15 +433,33 @@ class PolymarketProvider(OptionalProvider):
         if not self.is_enabled:
             return []
 
-        cache_key = f"events:{tag or 'all'}:{active}:{limit}"
+        resolved_tag_id = tag_id
+        if not resolved_tag_id and tag:
+            tag_ids = self.resolve_tag_ids([tag])
+            resolved_tag_id = tag_ids[0] if tag_ids else None
+
+        cache_key = (
+            f"events:{resolved_tag_id or tag or 'all'}:"
+            f"{active}:{closed}:{limit}:{offset or 0}:{order or ''}:{ascending}"
+        )
         cached = self._get_cached(cache_key)
         if cached:
             return [PolymarketEvent.from_dict(e) for e in cached]
 
         try:
-            params = {"limit": limit, "active": str(active).lower()}
-            if tag:
-                params["tag"] = tag
+            params: dict[str, Any] = {"limit": limit}
+            if resolved_tag_id:
+                params["tag_id"] = resolved_tag_id
+            if active is not None:
+                params["active"] = str(active).lower()
+            if closed is not None:
+                params["closed"] = str(closed).lower()
+            if order:
+                params["order"] = order
+            if ascending is not None:
+                params["ascending"] = str(ascending).lower()
+            if offset is not None:
+                params["offset"] = offset
 
             response = self._make_request(
                 "get",
@@ -306,9 +474,11 @@ class PolymarketProvider(OptionalProvider):
                     title=item.get("title", ""),
                     slug=item.get("slug", ""),
                     description=item.get("description", ""),
-                    end_date=item.get("endDate"),
+                    category=item.get("category"),
+                    end_date=item.get("endDate") or item.get("end_date"),
                     active=item.get("active", True),
                     markets=[m.get("id", "") for m in item.get("markets", [])],
+                    markets_data=item.get("markets", []) or [],
                     tags=[t.get("slug", "") for t in item.get("tags", [])],
                 )
                 events.append(event)
@@ -320,12 +490,17 @@ class PolymarketProvider(OptionalProvider):
             self.logger.warning(f"Failed to get events: {e}")
             return []
 
-    def get_markets_by_event(self, event_id: str) -> list[PolymarketMarket]:
+    def get_markets_by_event(
+        self,
+        event_id: str,
+        event_slug: Optional[str] = None,
+    ) -> list[PolymarketMarket]:
         """
         Get all markets for a specific event.
 
         Args:
             event_id: Polymarket event ID
+            event_slug: Polymarket event slug (preferred when available)
 
         Returns:
             List of PolymarketMarket objects
@@ -333,16 +508,23 @@ class PolymarketProvider(OptionalProvider):
         if not self.is_enabled:
             return []
 
-        cache_key = f"event_markets:{event_id}"
+        cache_key = f"event_markets:{event_id}:{event_slug or ''}"
         cached = self._get_cached(cache_key)
         if cached:
             return [PolymarketMarket.from_dict(m) for m in cached]
 
         try:
-            response = self._make_request(
-                "get",
-                f"{self.BASE_URL}/events/{event_id}",
-            )
+            response = None
+            if event_slug:
+                response = self._make_request(
+                    "get",
+                    f"{self.BASE_URL}/events/slug/{event_slug}",
+                )
+            if response is None:
+                response = self._make_request(
+                    "get",
+                    f"{self.BASE_URL}/events/{event_id}",
+                )
 
             markets = []
             for item in response.get("markets", []):
@@ -362,6 +544,7 @@ class PolymarketProvider(OptionalProvider):
         keywords: list[str],
         limit: int = 20,
         synonym_map: Optional[dict[str, list[str]]] = None,
+        use_clob: bool = True,
     ) -> list[PolymarketMarket]:
         """
         Search markets by keywords (for arbitrage trigger).
@@ -383,6 +566,9 @@ class PolymarketProvider(OptionalProvider):
         expanded_keywords = self._expand_keywords(keywords, synonym_map)
         self.logger.debug(f"Expanded {len(keywords)} keywords to {len(expanded_keywords)}")
 
+        if use_clob:
+            return self._search_clob_markets(expanded_keywords, limit=limit)
+
         all_markets = []
         seen_ids = set()
 
@@ -392,8 +578,10 @@ class PolymarketProvider(OptionalProvider):
                 "get",
                 f"{self.BASE_URL}/markets",
                 params={
-                    "limit": min(limit * len(expanded_keywords), 100),
+                    "limit": min(limit * len(expanded_keywords), 200),
                     "active": "true",
+                    "closed": "false",
+                    "archived": "false",
                 },
             )
 
@@ -407,7 +595,7 @@ class PolymarketProvider(OptionalProvider):
                     market_id = item.get("id", "")
                     if market_id and market_id not in seen_ids:
                         market = self._parse_market(item)
-                        if market:
+                        if market and self._is_market_usable(market):
                             all_markets.append(market)
                             seen_ids.add(market_id)
 
@@ -416,6 +604,106 @@ class PolymarketProvider(OptionalProvider):
 
         self.logger.info(f"Found {len(all_markets)} markets matching keywords")
         return all_markets
+
+    def _search_clob_markets(
+        self,
+        expanded_keywords: set[str],
+        limit: int = 20,
+        page_size: int = 200,
+        max_pages: int = 5,
+    ) -> list[PolymarketMarket]:
+        """Search active CLOB markets by keyword for fresher results."""
+        results: list[PolymarketMarket] = []
+        seen_ids = set()
+        offset = 0
+        pages = 0
+
+        while len(results) < limit and pages < max_pages:
+            try:
+                response = self._make_request(
+                    "get",
+                    f"{self.CLOB_BASE_URL}/markets",
+                    params={"limit": page_size, "offset": offset},
+                )
+            except Exception:
+                break
+
+            data = response.get("data", []) if isinstance(response, dict) else []
+            if not data:
+                break
+
+            for item in data:
+                if not item.get("active", False):
+                    continue
+                if item.get("archived", False):
+                    continue
+                if item.get("closed", False):
+                    continue
+                if not item.get("enable_order_book", False):
+                    continue
+                if not item.get("accepting_orders", False):
+                    continue
+
+                question = item.get("question", "")
+                description = item.get("description", "")
+                tags = item.get("tags", [])
+                tag_text = " ".join([t.get("slug", "") if isinstance(t, dict) else str(t) for t in tags])
+                search_text = f"{question} {description} {tag_text}".lower()
+
+                if not self._match_keywords(search_text, expanded_keywords):
+                    continue
+
+                market_id = item.get("condition_id") or item.get("question_id") or item.get("market_slug")
+                if not market_id or market_id in seen_ids:
+                    continue
+
+                tokens = item.get("tokens", [])
+                yes_token = tokens[0].get("token_id") if len(tokens) > 0 else None
+                no_token = tokens[1].get("token_id") if len(tokens) > 1 else None
+
+                market = PolymarketMarket(
+                    market_id=str(market_id),
+                    event_id=str(item.get("question_id") or market_id),
+                    question=question,
+                    outcomes=[t.get("outcome", "") for t in tokens] if tokens else ["Yes", "No"],
+                    end_time=item.get("end_date_iso"),
+                    active=item.get("active", True),
+                    yes_token_id=yes_token,
+                    no_token_id=no_token,
+                    condition_id=item.get("condition_id"),
+                    tags=[t.get("slug", "") if isinstance(t, dict) else str(t) for t in tags],
+                    volume=0.0,
+                    liquidity=0.0,
+                )
+
+                results.append(market)
+                seen_ids.add(market_id)
+                if len(results) >= limit:
+                    break
+
+            offset += page_size
+            pages += 1
+
+        self.logger.info(f"Found {len(results)} CLOB markets matching keywords")
+        return results
+
+    @staticmethod
+    def _is_market_usable(market: PolymarketMarket) -> bool:
+        """Filter out expired/inactive or non-CLOB markets."""
+        if not market.active:
+            return False
+        # Require CLOB token for quote
+        if not market.yes_token_id:
+            return False
+        # Filter expired markets if end_time is present
+        if market.end_time:
+            try:
+                end_dt = datetime.fromisoformat(market.end_time.replace("Z", "+00:00"))
+                if end_dt <= datetime.now(timezone.utc):
+                    return False
+            except Exception:
+                pass
+        return True
 
     def _expand_keywords(
         self,
@@ -506,8 +794,8 @@ class PolymarketProvider(OptionalProvider):
                 except Exception:
                     pass
 
-            # Get CLOB token IDs
-            clob_tokens = item.get("clobTokenIds", [])
+            # Get CLOB token IDs (normalize to list)
+            clob_tokens = self._normalize_clob_tokens(item.get("clobTokenIds", []))
             yes_token = clob_tokens[0] if len(clob_tokens) > 0 else None
             no_token = clob_tokens[1] if len(clob_tokens) > 1 else None
 
@@ -515,7 +803,7 @@ class PolymarketProvider(OptionalProvider):
                 market_id=market_id,
                 event_id=event_id or item.get("eventId", item.get("event_id", "")),
                 question=item.get("question", ""),
-                outcomes=item.get("outcomes", ["Yes", "No"]),
+                outcomes=self._normalize_outcomes(item.get("outcomes")),
                 end_time=end_time_str,
                 active=item.get("active", True),
                 yes_token_id=yes_token,
@@ -524,11 +812,59 @@ class PolymarketProvider(OptionalProvider):
                 tags=[t.get("slug", "") if isinstance(t, dict) else t for t in item.get("tags", [])],
                 volume=float(item.get("volume", 0) or 0),
                 liquidity=float(item.get("liquidity", 0) or 0),
+                outcome_prices=self._normalize_prices(item.get("outcomePrices")),
                 tenor_days=tenor_days,
             )
         except Exception as e:
             self.logger.warning(f"Failed to parse market: {e}")
             return None
+
+    @staticmethod
+    def _normalize_clob_tokens(value: Any) -> list[str]:
+        """Normalize CLOB token ids to a list of strings."""
+        if isinstance(value, list):
+            return [str(v) for v in value if v]
+        if isinstance(value, str):
+            # Some APIs return JSON string like '["id1","id2"]'
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, list):
+                    return [str(v) for v in parsed if v]
+            except Exception:
+                return []
+        return []
+
+    @staticmethod
+    def _normalize_outcomes(value: Any) -> list[str]:
+        if isinstance(value, list):
+            return [str(v) for v in value if v]
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, list):
+                    return [str(v) for v in parsed if v]
+            except Exception:
+                return []
+        return ["Yes", "No"]
+
+    @staticmethod
+    def _normalize_prices(value: Any) -> list[float]:
+        if isinstance(value, list):
+            prices = []
+            for v in value:
+                try:
+                    prices.append(float(v))
+                except Exception:
+                    continue
+            return prices
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, list):
+                    return [float(v) for v in parsed if v is not None]
+            except Exception:
+                return []
+        return []
 
     def get_orderbook(
         self,
@@ -543,29 +879,69 @@ class PolymarketProvider(OptionalProvider):
         Returns:
             Orderbook dict with bids/asks or None
         """
-        if not self.is_enabled:
+        if not self.is_enabled or not token_id:
+            return None
+
+        # Some markets don't have orderbooks; avoid noisy errors for invalid tokens
+        if isinstance(token_id, str) and token_id.strip() in {"", "[]", "None"}:
             return None
 
         cache_key = f"orderbook:{token_id}"
-        cached = self._get_cached(cache_key)
+        cached = self._orderbook_cache.get(cache_key)
         if cached:
             return cached
 
         try:
-            response = self._make_request(
-                "get",
+            response = self.http.client.get(
                 f"{self.CLOB_BASE_URL}/book",
                 params={"token_id": token_id},
+                timeout=self.http.timeout,
             )
 
-            if response:
-                # Short TTL for orderbook (5 seconds)
-                self.cache.set(f"{self.name}:{cache_key}", response, ttl=5)
-            return response
+            if response.status_code == 404:
+                # No orderbook for this token; treat as missing
+                return None
 
+            if response.status_code >= 400:
+                self.logger.warning(
+                    f"Orderbook request failed: HTTP {response.status_code}"
+                )
+                return None
+
+            data = response.json()
+            if data:
+                # Cache orderbook with short TTL
+                self._orderbook_cache.set(cache_key, data)
+            return data
+
+        except (httpx.TimeoutException, httpx.NetworkError) as e:
+            self.logger.warning(f"Orderbook request error: {e}")
+            return None
         except Exception as e:
             self.logger.warning(f"Failed to get orderbook for {token_id}: {e}")
+        return None
+
+    def get_price(self, token_id: str, side: str = "buy") -> Optional[float]:
+        """Get price from CLOB price endpoint (fallback when orderbook missing)."""
+        if not self.is_enabled or not token_id:
             return None
+
+        try:
+            response = self.http.client.get(
+                f"{self.CLOB_BASE_URL}/price",
+                params={"token_id": token_id, "side": side},
+                timeout=self.http.timeout,
+            )
+            if response.status_code >= 400:
+                return None
+            data = response.json()
+            if isinstance(data, dict) and "price" in data:
+                return float(data.get("price"))
+            if isinstance(data, (int, float)):
+                return float(data)
+        except Exception as e:
+            self.logger.warning(f"Price request error: {e}")
+        return None
 
     def get_quote(self, market: PolymarketMarket) -> Optional[PolymarketQuote]:
         """
@@ -579,24 +955,59 @@ class PolymarketProvider(OptionalProvider):
         Returns:
             PolymarketQuote or None
         """
-        if not self.is_enabled or not market.yes_token_id:
+        if not self.is_enabled:
             return None
 
-        book = self.get_orderbook(market.yes_token_id)
-        if not book:
-            return None
+        if market.yes_token_id:
+            book = self.get_orderbook(market.yes_token_id)
+            # Only use orderbook if it has actual bids or asks
+            if book and (book.get("bids") or book.get("asks")):
+                try:
+                    quote = PolymarketQuote.from_orderbook(
+                        market_id=market.market_id,
+                        book=book,
+                        timestamp=format_timestamp(now_utc()),
+                    )
+                    quote.volume_24h = market.volume
+                    return quote
+                except Exception as e:
+                    self.logger.warning(f"Failed to create quote for {market.market_id}: {e}")
 
-        try:
-            quote = PolymarketQuote.from_orderbook(
-                market_id=market.market_id,
-                book=book,
-                timestamp=format_timestamp(now_utc()),
-            )
-            quote.volume_24h = market.volume
-            return quote
-        except Exception as e:
-            self.logger.warning(f"Failed to create quote for {market.market_id}: {e}")
-            return None
+            # Fallback to price endpoint when orderbook missing
+            price = self.get_price(market.yes_token_id, side="buy")
+            if price is not None:
+                return PolymarketQuote(
+                    market_id=market.market_id,
+                    timestamp=format_timestamp(now_utc()),
+                    bid=price,
+                    ask=price,
+                    mid=price,
+                    spread=0.0,
+                    spread_bps=0.0,
+                    depth_bid=0.0,
+                    depth_ask=0.0,
+                    volume_24h=market.volume,
+                )
+
+        # Fallback to Gamma outcomePrices if available
+        if market.outcome_prices:
+            try:
+                yes_price = float(market.outcome_prices[0])
+                return PolymarketQuote(
+                    market_id=market.market_id,
+                    timestamp=format_timestamp(now_utc()),
+                    bid=yes_price,
+                    ask=yes_price,
+                    mid=yes_price,
+                    spread=0.0,
+                    spread_bps=0.0,
+                    depth_bid=0.0,
+                    depth_ask=0.0,
+                    volume_24h=market.volume,
+                )
+            except Exception:
+                pass
+        return None
 
     def get_quotes_batch(
         self,

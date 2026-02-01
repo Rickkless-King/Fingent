@@ -5,6 +5,21 @@
 
 ## 项目定位
 
+### 一句话总结（新手友好）
+**Fingent = 把宏观数据、行情、新闻、预测市场融合起来，自动生成“可读的市场简报 + 风险信号 + 机会线索”。**
+
+你可以把它理解为一个“自动化的宏观研究助理”：  
+它会持续拉取数据、做规则判断、生成结构化结果，并提供 Streamlit 面板让你快速浏览。
+
+### 完整功能概览（当前版本）
+1. **宏观数据分析**：FRED 宏观指标（利率、通胀、就业）自动汇总  
+2. **跨资产行情**：美股、加密、黄金等价格变动与风险方向  
+3. **新闻聚合与情绪**：多新闻源轮询 + 统一情感分析  
+4. **预测市场监控**（重点）：Polymarket 概率突变榜单 + 24h 曲线  
+5. **套利提示**（可选）：期限结构错位检测  
+6. **通知与持久化**：Telegram 推送 + SQLite 历史存档  
+7. **Streamlit 面板**：可视化查看全部结果
+
 ### 核心价值
 
 1. **自动化 Top-Down 分析**：宏观经济 → 跨资产联动 → 市场情绪 → 综合报告
@@ -12,11 +27,12 @@
 3. **插件化架构**：数据源、分析节点、告警规则可独立增删
 4. **工程可维护**：不是一次性 demo，而是能持续迭代的系统
 
-### 解决的问题
+### 解决的问题（新手视角）
 
-- 手动盯盘太累，信息分散在多个平台
-- 宏观数据（利率、CPI）、市场数据（BTC、黄金、美股）、情绪数据需要整合分析
-- 需要系统自动帮你"连点成线"，给出结构化判断
+- **信息碎片化**：新闻、行情、宏观、情绪散落在不同平台  
+- **手动盯盘太耗时**：你需要一个“自动汇总 + 预警”的工具  
+- **需要可解释的信号**：不仅告诉你“涨跌”，还告诉你“为什么”  
+- **希望有实时关注点**：例如 Polymarket 赔率突变、流动性热点
 
 ---
 
@@ -449,6 +465,9 @@ ALPHAVANTAGE_API_KEY=xxx   # 新闻情绪分析
 ```env
 DEEPSEEK_API_KEY=xxx       # AI 分析生成
 TELEGRAM_BOT_TOKEN=xxx     # Telegram 推送
+TELEGRAM_CHAT_ID=xxx       # Telegram Chat ID（推送目标）
+POLYMARKET_ENABLED=true    # 启用 Polymarket（监控/套利用）
+POLYMARKET_API_KEY=xxx     # 如需鉴权可填写（不需要时可留空）
 ```
 
 ### 3. 运行
@@ -459,6 +478,9 @@ python -m fingent.cli.main --once
 
 # 定时运行
 python -m fingent.cli.main --scheduled
+
+# 预测市场监控（低频全量 + 高频热点）
+python -m fingent.cli.main --monitor
 
 # 启动 Streamlit 面板
 streamlit run fingent/ui/streamlit_app.py
@@ -491,6 +513,44 @@ Streamlit Dashboard 采用「晨报/简报」风格，面向普通投资者设�
 │  SPY: $582.30 (+0.8%)  QQQ: $510.20 (+1.2%) │
 └─────────────────────────────────────────────┘
 ```
+
+### Streamlit 页面（新手如何用）
+**入口**：`streamlit run fingent/ui/streamlit_app.py`
+
+进入页面后你会看到 4 个 Tab（如果 Polymarket 启用）：
+
+1) **Latest Report**  
+   - 展示最新一次运行的“市场简报”
+   - 包含方向评分、核心信号、新闻摘要、市场概览
+
+2) **History**  
+   - 查看历史运行结果与趋势图
+
+3) **Raw Data**  
+   - 查看底层原始数据（适合调试）
+
+4) **Polymarket**  
+   - **Probability Shock Leaderboard**：扫描概率突变（你关注的四分区）  
+   - **Shock Details**：查看 24h 走势与区间变化  
+   - **Term Structure Arbitrage**：期限结构套利扫描（可选）
+   - **Monitoring Control**：页面内可一键启动/停止后台监控进程（自动采样写入 SQLite）
+   - **Demo Data**：可加载“伪造结果”预览 UI 布局（不会写入数据库）
+
+**常见按钮解释**
+- **Scan Probability Shocks**：扫描是否出现“赔率/概率突变”  
+- **Reset Shock Baselines**：重置基准（下次扫描才会比较变化）  
+
+**常见显示含义**
+- **Events Scanned**：扫描到的事件数量  
+- **Markets Scanned**：扫描到的市场数量  
+- **Shocks Found**：满足“变化阈值 + 流动性过滤”的突变数量  
+- **Tags**：fallback 标签召回数量（若使用分区标签策略，可能显示 0，属正常）
+
+**调试/演示**
+- 如果市场缺少订单簿或基准太旧，可以在页面的 **Demo Settings** 勾选  
+  - “Allow synthetic quotes (no orderbook)”  
+  - “Allow stale baselines”  
+  这样可以快速看到突变效果（仅用于演示）。
 
 ### 新闻显示
 
@@ -536,6 +596,112 @@ LLM 会将这些技术术语翻译成普通投资者能理解的语言，例如�
 > "今日市场整体偏向乐观。美联储官员表态偏温和，通胀数据略有回落，资金正从避险资产流向风险资产。值得关注的是黄金价格有所回调，建议持续关注科技股表现。"
 
 ---
+
+## 新手上手指南（一步到位）
+
+如果你是第一次使用 Fingent，可以按下面顺序操作：
+
+1) **安装依赖**
+```bash
+python -m venv venv
+venv\Scripts\activate
+pip install -e ".[dev]"
+```
+
+2) **配置 `.env`**
+复制 `.env.example` 为 `.env`，并至少配置：
+- `FINNHUB_API_KEY`（行情/新闻）
+- `FRED_API_KEY`（宏观）
+- `POLYMARKET_ENABLED=true`（开启预测市场监控）
+- `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`（如需推送）
+
+3) **先跑一次流程**
+```bash
+python -m fingent.cli.main --once
+```
+生成一份报告与快照。
+
+4) **打开面板**
+```bash
+streamlit run fingent/ui/streamlit_app.py
+```
+进入 **Polymarket** 页签，可手动扫描概率突变和套利机会。
+
+5) **开启常驻监控（推荐）**
+```bash
+python -m fingent.cli.main --monitor
+```
+这个命令会：
+- 低频全量扫描（默认 30 分钟）
+- 高频热点扫描（默认 3 分钟）
+- 检测到重大概率变化后自动推送 Telegram
+
+热点和冷却状态会保存在 `data/hotspots.json`、`data/shock_cooldown.json`。
+价格基准与历史会写入 SQLite（`shock_prices` 表），用于重启后继续对比变化。
+
+6) **确认四大分区是否命中**
+```bash
+python -m fingent.cli.main --list-polymarket-tags
+```
+将输出的 tag slug 或 id 填入 `config/config.yaml` 的 `polymarket_sector_tags`。
+
+---
+
+## 预测市场监控（低频全量 + 高频热点）
+
+监控模式适用于 **实时盯盘 + 重大变化推送** 的场景：
+
+**工作机制**
+1. **低频全量扫描**：从 Polymarket 拉取事件/市场，计算活跃度并生成热点列表  
+2. **高频热点扫描**：只扫描热点市场，发现概率突变就推送
+
+**历史数据与可视化**
+- 每次扫描会把最新 mid 价格写入 SQLite（`shock_prices` 表）
+- 在 Streamlit 的 **Polymarket → Shock Details** 中会显示 **24h 历史曲线** 与 **区间变化统计**
+- 过期市场（end_time 已过）会在低频全量扫描时自动清理历史数据
+
+**配置位置**：`config/config.yaml`
+```yaml
+monitoring:
+  enabled: true
+  low_freq_minutes: 30      # 低频全量扫描
+  high_freq_minutes: 3      # 高频热点扫描
+  hotspots_limit: 30        # 热点数量
+  hotspot_min_volume: 3000  # 热点最小成交量
+  cooldown_minutes: 30      # 推送冷却
+  max_events_per_tag: 20
+  max_markets_per_event: 10
+  hotspot_min_depth_usd: 300
+  hotspot_max_spread_bps: 600
+```
+
+**分区标签配置（推荐：经济/政治/财经/加密）**
+```yaml
+polymarket_sector_tags:
+  politics: ["politics"]
+  finance: ["finance"]
+  economy: ["economy"]
+  crypto: ["crypto"]
+```
+系统会先通过 Gamma `/tags` 解析 tag_id，再用 `/events?tag_id=...` 拉取事件，避免关键词误召回。若没有配置 `polymarket_sector_tags`，则退回到 `polymarket_sectors` 关键词召回作为兜底。
+为了减少 404 噪音，系统会优先使用 `/events` 返回的 `markets` 列表直接解析，必要时才回退 `/events/{id}` 或 `/events/slug/{slug}`。
+
+**如何确认 tag slug/id**
+```bash
+python -m fingent.cli.main --list-polymarket-tags
+```
+在输出中找到你想要的分区标签，填入 `polymarket_sector_tags`（支持 slug 或 id）。
+
+---
+
+## 常见问题
+
+**Q: 为什么第一次扫描“没有概率突变”？**  
+A: 第一次扫描主要用来建立基准（baseline），需要隔一段时间再扫才会检测到变化。
+
+**Q: 没有推送 Telegram？**  
+A: 检查 `.env` 里的 `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` / `TELEGRAM_ENABLED`，以及 `monitoring.cooldown_minutes` 是否过长。
+
 
 ## 配置说明
 

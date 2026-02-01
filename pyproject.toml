@@ -36,6 +36,7 @@ dependencies = [
     "ccxt>=4.0.0",
     "dbnomics>=1.2.0",        # 全球宏观经济数据 (无需 API Key)
     "polygon>=1.2.0",         # Polygon.io/Massive 美股数据
+    "py-clob-client>=0.34.0", # Polymarket CLOB 官方 SDK
 
     # Database
     "sqlalchemy>=2.0.0",

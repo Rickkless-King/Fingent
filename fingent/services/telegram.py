@@ -204,6 +204,34 @@ class TelegramService:
 
         return self.send_message(text)
 
+    def send_shock(self, shock: dict[str, Any]) -> bool:
+        """
+        Send a probability shock notification.
+        """
+        event_title = shock.get("event_title") or "Unknown Event"
+        question = shock.get("question") or "Unknown Market"
+        delta = shock.get("delta", 0)
+        current_mid = shock.get("current_mid", 0)
+        baseline_mid = shock.get("baseline_mid", 0)
+        volume_24h = shock.get("volume_24h")
+        depth_usd = shock.get("depth_usd")
+        spread_bps = shock.get("spread_bps")
+        timestamp = shock.get("timestamp", "")
+
+        text = (
+            "⚡ Probability Shock\n\n"
+            f"Event: {event_title}\n"
+            f"Market: {question}\n"
+            f"Delta: {delta:+.2%}\n"
+            f"Prob: {current_mid:.2%} (baseline {baseline_mid:.2%})\n"
+            f"Volume24h: {volume_24h if volume_24h is not None else 'N/A'}\n"
+            f"Depth: {depth_usd if depth_usd is not None else 'N/A'}\n"
+            f"Spread: {spread_bps if spread_bps is not None else 'N/A'} bps\n"
+            f"Time: {timestamp}"
+        )
+
+        return self.send_message(text, parse_mode=None)
+
 
 def create_telegram_service(
     settings: Optional[Settings] = None,

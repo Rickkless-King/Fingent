@@ -7,6 +7,10 @@ Run with: streamlit run fingent/ui/streamlit_app.py
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
+from pathlib import Path
+import subprocess
+import os
+import sys
 
 # Import Fingent modules
 from fingent.core.config import get_settings, load_yaml_config
@@ -27,6 +31,13 @@ try:
     ARB_AVAILABLE = True
 except ImportError:
     ARB_AVAILABLE = False
+
+# Shock store for persistent baselines (optional)
+try:
+    from fingent.services.shock_store import ShockStore
+    SHOCK_STORE_AVAILABLE = True
+except ImportError:
+    SHOCK_STORE_AVAILABLE = False
 
 
 def _clear_news_cache():
@@ -99,9 +110,9 @@ def main():
     # Main content
     persistence = create_persistence_service()
 
-    # Tabs - include Arbitrage if available
+    # Tabs - include Polymarket if available
     if ARB_AVAILABLE:
-        tab1, tab2, tab3, tab4 = st.tabs(["Latest Report", "History", "Raw Data", "Arbitrage"])
+        tab1, tab2, tab3, tab4 = st.tabs(["Latest Report", "History", "Raw Data", "Polymarket"])
     else:
         tab1, tab2, tab3 = st.tabs(["Latest Report", "History", "Raw Data"])
         tab4 = None
@@ -312,7 +323,7 @@ def show_latest_report(persistence):
             # Color code by direction
             st.dataframe(
                 df,
-                use_container_width=True,
+                width="stretch",
                 column_config={
                     "score": st.column_config.ProgressColumn(
                         "Score",
@@ -558,12 +569,12 @@ def show_history(persistence):
         with tab1:
             st.line_chart(
                 history_df.set_index("timestamp")[["overall_score"]],
-                use_container_width=True,
+                width="stretch",
             )
         with tab2:
             st.line_chart(
                 history_df.set_index("timestamp")[["signals", "alerts"]],
-                use_container_width=True,
+                width="stretch",
             )
 
     # Detail view
@@ -632,7 +643,7 @@ def show_raw_data(persistence):
             if macro.get("rates"):
                 st.subheader("Interest Rates")
                 rates_df = pd.DataFrame([macro["rates"]])
-                st.dataframe(rates_df, use_container_width=True)
+                st.dataframe(rates_df, width="stretch")
 
             # Inflation
             if macro.get("inflation"):
@@ -654,7 +665,7 @@ def show_raw_data(persistence):
                 for k, v in market["quotes"].items()
             ]
             df = pd.DataFrame(quotes_list)
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, width="stretch")
         else:
             st.info("No market data")
 
@@ -665,7 +676,7 @@ def show_raw_data(persistence):
             df = pd.DataFrame(articles)
             display_cols = ["title", "source", "published_at", "sentiment_score"]
             df = df[[c for c in display_cols if c in df.columns]]
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, width="stretch")
         else:
             st.info("No news data")
 
@@ -696,15 +707,40 @@ def build_history_df(persistence, limit: int = 20) -> pd.DataFrame:
 
 
 def show_arbitrage():
-    """Show Polymarket arbitrage detection interface."""
-    st.header("Polymarket Arbitrage Detection")
-    st.caption("Term Structure Arbitrage: Detect price divergence between same-event markets with different expiries")
+    """Show Polymarket probability shock + arbitrage interface."""
+    st.header("Polymarket Monitor")
+    st.caption("Track probability shocks first, then term-structure arbitrage")
 
     config = load_yaml_config()
     arb_config = config.get("arbitrage", {})
+    shock_config = arb_config.get("probability_shock", {})
+
+    # Lightweight monitoring controls (optional)
+    st.subheader("🛰️ Monitoring Control")
+    monitor_status = _get_monitor_status()
+    status_text = "Running" if monitor_status["running"] else "Stopped"
+    st.info(f"Monitor Status: {status_text}")
+    col_m1, col_m2 = st.columns(2)
+    with col_m1:
+        if st.button("▶️ Start Monitor", disabled=monitor_status["running"]):
+            started = _start_monitor_process()
+            if started:
+                st.success("Monitor started in background.")
+            else:
+                st.warning("Monitor is already running or failed to start.")
+    with col_m2:
+        if st.button("⏹️ Stop Monitor", disabled=not monitor_status["running"]):
+            stopped = _stop_monitor_process()
+            if stopped:
+                st.success("Monitor stopped.")
+            else:
+                st.warning("Monitor not running or could not stop.")
+    st.caption("Monitor runs in a background process and writes data to SQLite.")
+    st.divider()
 
     # Status
     enabled = arb_config.get("enabled", False)
+    shock_enabled = shock_config.get("enabled", True)
     if not enabled:
         st.warning(
             "Arbitrage detection is disabled in config. "
@@ -714,10 +750,17 @@ def show_arbitrage():
     # Sidebar info for arbitrage
     with st.sidebar:
         st.divider()
-        st.header("Arbitrage Config")
-        st.text(f"Enabled: {enabled}")
+        st.header("Polymarket Config")
+        st.text(f"Arbitrage Enabled: {enabled}")
+        st.text(f"Shock Enabled: {shock_enabled}")
+
+        st.caption("Shock Monitor")
+        st.text(f"Delta Threshold: {shock_config.get('delta_threshold', 0.05)}")
+        st.text(f"Lookback: {shock_config.get('lookback_minutes', 60)} min")
+        st.text(f"Min Age: {shock_config.get('min_age_seconds', 60)} s")
 
         ts_config = arb_config.get("term_structure", {})
+        st.caption("Term Structure")
         st.text(f"Delta Threshold: {ts_config.get('delta_threshold', 0.05)}")
         st.text(f"Trigger Window: {ts_config.get('trigger_window_minutes', 120)} min")
 
@@ -725,20 +768,222 @@ def show_arbitrage():
         st.caption("Risk Filters")
         st.text(f"Min Volume: ${risk_config.get('min_volume_24h', 5000)}")
         st.text(f"Max Spread: {risk_config.get('max_spread_bps', 300)} bps")
+        st.text(f"Min Depth: ${risk_config.get('min_depth_usd', 1000)}")
 
     # Initialize engine in session state
     if "arb_engine" not in st.session_state:
         st.session_state.arb_engine = None
         st.session_state.arb_results = None
+    if "shock_results" not in st.session_state:
+        st.session_state.shock_results = None
+    if "shock_store" not in st.session_state:
+        st.session_state.shock_store = ShockStore() if SHOCK_STORE_AVAILABLE else None
+    if "demo_loaded" not in st.session_state:
+        st.session_state.demo_loaded = False
+
+    # Demo data (for UI preview)
+    with st.expander("🧪 Demo Data (fake, UI preview)", expanded=False):
+        st.caption("This creates fake results so you can preview the UI layout.")
+        col_d1, col_d2 = st.columns(2)
+        with col_d1:
+            if st.button("Load Demo Results"):
+                _load_demo_results()
+                st.session_state.demo_loaded = True
+                st.success("Demo data loaded.")
+        with col_d2:
+            if st.button("Clear Demo Results"):
+                st.session_state.shock_results = None
+                st.session_state.arb_results = None
+                st.session_state.demo_loaded = False
+                st.info("Demo data cleared.")
+
+    # ============================================
+    # Section 1: Probability Shock Leaderboard
+    # ============================================
+    st.subheader("⚡ Probability Shock Leaderboard")
+
+    with st.expander("⚙️ Demo Settings (temporary overrides)", expanded=False):
+        st.caption("These overrides apply only to this scan, for quick preview.")
+        demo_delta = st.slider(
+            "Delta Threshold",
+            min_value=0.0,
+            max_value=0.20,
+            value=float(shock_config.get("delta_threshold", 0.05)),
+            step=0.01,
+        )
+        demo_allow_illiquid = st.checkbox(
+            "Allow synthetic quotes (no orderbook)",
+            value=False,
+            help="Use Gamma/CLOB price even if orderbook depth is missing.",
+        )
+        demo_allow_stale = st.checkbox(
+            "Allow stale baselines",
+            value=False,
+            help="Use last stored baseline even if older than lookback.",
+        )
+        demo_min_volume = st.number_input(
+            "Min Volume 24h (USD)",
+            min_value=0,
+            max_value=100000,
+            value=int(arb_config.get("risk", {}).get("min_volume_24h", 5000)),
+            step=500,
+        )
+        demo_min_depth = st.number_input(
+            "Min Depth (USD)",
+            min_value=0,
+            max_value=100000,
+            value=int(arb_config.get("risk", {}).get("min_depth_usd", 1000)),
+            step=100,
+        )
+        demo_max_spread = st.number_input(
+            "Max Spread (bps)",
+            min_value=50,
+            max_value=100000,
+            value=min(int(arb_config.get("risk", {}).get("max_spread_bps", 300)), 100000),
+            step=50,
+        )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        if st.button("⚡ Scan Probability Shocks", type="primary", disabled=not enabled or not shock_enabled):
+            with st.spinner("Scanning Polymarket for probability shocks..."):
+                try:
+                    shock_store = st.session_state.shock_store
+                    if st.session_state.arb_engine is None:
+                        engine = ArbEngine(shock_store=shock_store)
+                    else:
+                        engine = st.session_state.arb_engine
+                        if shock_store and getattr(engine, "shock_store", None) is None:
+                            engine.shock_store = shock_store
+                    st.session_state.arb_engine = engine
+                    # Apply demo overrides for this scan only
+                    original_shock = dict(engine.config.get("probability_shock", {}))
+                    original_risk = dict(engine.config.get("risk", {}))
+                    engine.config.setdefault("probability_shock", {})
+                    engine.config["probability_shock"]["delta_threshold"] = float(demo_delta)
+                    engine.config["probability_shock"]["allow_illiquid_quotes"] = bool(demo_allow_illiquid)
+                    engine.config["probability_shock"]["allow_stale_baseline"] = bool(demo_allow_stale)
+                    engine.config.setdefault("risk", {})
+                    engine.config["risk"]["min_volume_24h"] = float(demo_min_volume)
+                    engine.config["risk"]["min_depth_usd"] = float(demo_min_depth)
+                    engine.config["risk"]["max_spread_bps"] = float(demo_max_spread)
+
+                    results = engine.scan_probability_shocks()
+
+                    # Restore config
+                    engine.config["probability_shock"] = original_shock
+                    engine.config["risk"] = original_risk
+                    st.session_state.shock_results = results
+                    found = results.get("shocks_found", 0)
+                    if found:
+                        st.success(f"Found {found} shock(s)!")
+                    else:
+                        st.info("No probability shocks detected")
+                except Exception as e:
+                    st.error(f"Shock scan failed: {e}")
+
+    with col2:
+        if st.button("🧹 Reset Shock Baselines", disabled=not enabled):
+            st.session_state.shock_results = None
+            st.session_state.arb_engine = None
+            st.success("Shock baselines will refresh on next scan.")
+
+    st.divider()
+
+    shock_results = st.session_state.shock_results
+    if shock_results:
+        stat_cols = st.columns(4)
+        with stat_cols[0]:
+            st.metric("Events Scanned", shock_results.get("events_scanned", 0))
+        with stat_cols[1]:
+            st.metric("Markets Scanned", shock_results.get("markets_scanned", 0))
+        with stat_cols[2]:
+            st.metric("Shocks Found", shock_results.get("shocks_found", 0))
+        with stat_cols[3]:
+            st.metric("Tags", len(shock_results.get("tags_used", [])))
+
+        shocks = shock_results.get("shocks", [])
+        if shocks:
+            df_rows = []
+            for s in shocks:
+                delta = s.get("delta", 0)
+                direction = "⬆️" if delta > 0 else "⬇️"
+                vol = s.get("volume_24h")
+                df_rows.append({
+                    "Dir": direction,
+                    "Δ": f"{delta:+.2%}",
+                    "Prob": f"{s.get('current_mid', 0):.2%}",
+                    "Age": f"{s.get('age_minutes', 0):.1f}m",
+                    "Sector": s.get("sector", "") or "N/A",
+                    "Vol24h": f"${vol:,.0f}" if isinstance(vol, (int, float)) else "N/A",
+                    "Spread": f"{s.get('spread_bps', 0):.0f}bps",
+                    "Depth": f"${s.get('depth_usd', 0):,.0f}",
+                    "Question": (s.get("question", "")[:90] + "...")
+                    if len(s.get("question", "")) > 90 else s.get("question", ""),
+                })
+            df = pd.DataFrame(df_rows)
+            st.dataframe(df, width="stretch", hide_index=True)
+
+            with st.expander("Shock Details", expanded=False):
+                for i, s in enumerate(shocks):
+                    with st.container():
+                        st.markdown(
+                            f"**#{i+1} {s.get('question', 'Unknown')}**"
+                        )
+                        st.text(f"Event: {s.get('event_title', '')} ({s.get('event_id', '')[:8]}...)")
+                        st.text(f"Market: {s.get('market_id', '')}")
+                        if s.get("sector"):
+                            st.text(f"Sector: {s.get('sector')}")
+                        st.text(f"Δ: {s.get('delta', 0):+.2%} | Prob: {s.get('current_mid', 0):.2%}")
+                        st.text(f"Age: {s.get('age_minutes', 0):.1f}m | Spread: {s.get('spread_bps', 0):.0f}bps")
+                        st.text(f"Volume24h: {s.get('volume_24h', 0):,.0f} | Depth: {s.get('depth_usd', 0):,.0f}")
+                        if s.get("end_time"):
+                            st.text(f"End: {s.get('end_time')}")
+                        # 24h history chart (if available)
+                        shock_store = st.session_state.shock_store
+                        market_id = s.get("market_id", "")
+                        if shock_store and market_id:
+                            history = shock_store.get_history(market_id, window_minutes=1440, limit=1000)
+                            if history and len(history) > 1:
+                                hist_df = pd.DataFrame(history)
+                                hist_df["timestamp"] = pd.to_datetime(hist_df["timestamp"])
+                                st.line_chart(
+                                    hist_df.set_index("timestamp")[["mid"]],
+                                    width="stretch",
+                                )
+                                stats = shock_store.get_window_stats(market_id, window_minutes=1440)
+                                if stats:
+                                    max_change = stats["max"] - stats["min"]
+                                    baseline = stats["first"] or 0.0
+                                    max_change_pct = (max_change / baseline) if baseline else 0.0
+                                    st.caption(
+                                        f"24h range: {stats['min']:.2%} -> {stats['max']:.2%} "
+                                        f"(Delta {max_change:+.2%}, {max_change_pct:+.2%} vs first)"
+                                    )
+                            else:
+                                st.caption("No 24h history yet (need more samples).")
+                        st.markdown("---")
+        else:
+            st.info("No probability shocks in the current window.")
+    else:
+        st.info("Click 'Scan Probability Shocks' to build the leaderboard.")
+
+    st.divider()
+
+    # ============================================
+    # Section 2: Term Structure Arbitrage
+    # ============================================
+    st.subheader("📈 Term Structure Arbitrage")
 
     # Controls
     col1, col2 = st.columns(2)
 
     with col1:
-        if st.button("🔍 Scan Polymarket", type="primary", disabled=not enabled):
+        if st.button("🔍 Scan Polymarket (Arb)", disabled=not enabled):
             with st.spinner("Scanning Polymarket for arbitrage opportunities..."):
                 try:
-                    engine = ArbEngine()
+                    engine = st.session_state.arb_engine or ArbEngine()
                     st.session_state.arb_engine = engine
 
                     # Run scan
@@ -754,10 +999,10 @@ def show_arbitrage():
                     st.error(f"Scan failed: {e}")
 
     with col2:
-        if st.button("📰 Scan with News Trigger", disabled=not enabled):
+        if st.button("📰 Scan with News Trigger (Arb)", disabled=not enabled):
             with st.spinner("Fetching news and scanning for arbitrage..."):
                 try:
-                    engine = ArbEngine()
+                    engine = st.session_state.arb_engine or ArbEngine()
                     st.session_state.arb_engine = engine
 
                     # Run with Finnhub news
@@ -778,8 +1023,6 @@ def show_arbitrage():
 
                 except Exception as e:
                     st.error(f"Scan failed: {e}")
-
-    st.divider()
 
     # Display results
     results = st.session_state.arb_results
@@ -827,7 +1070,7 @@ def show_arbitrage():
                     legs = opp.get("legs", [])
                     if legs:
                         leg_df = pd.DataFrame(legs)
-                        st.dataframe(leg_df, use_container_width=True)
+                        st.dataframe(leg_df, width="stretch")
 
                     # Risk flags
                     risk_flags = opp.get("risk_flags", [])
@@ -850,7 +1093,7 @@ def show_arbitrage():
                 st.error(error)
 
     else:
-        st.info("Click 'Scan Polymarket' or 'Scan with News Trigger' to detect arbitrage opportunities.")
+        st.info("Click 'Scan Polymarket (Arb)' or 'Scan with News Trigger (Arb)' to detect arbitrage opportunities.")
 
     # Keywords reference
     with st.expander("Trigger Keywords (from config)"):
@@ -860,6 +1103,189 @@ def show_arbitrage():
                 st.code(kw)
         else:
             st.info("No trigger keywords configured")
+
+
+def _monitor_pid_path() -> Path:
+    data_dir = Path("data")
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return data_dir / "monitor.pid"
+
+
+def _get_monitor_status() -> dict:
+    pid_path = _monitor_pid_path()
+    if not pid_path.exists():
+        return {"running": False, "pid": None}
+    try:
+        pid = int(pid_path.read_text(encoding="utf-8").strip())
+    except Exception:
+        return {"running": False, "pid": None}
+    return {"running": _pid_is_running(pid), "pid": pid}
+
+
+def _pid_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return False
+
+
+def _start_monitor_process() -> bool:
+    status = _get_monitor_status()
+    if status["running"]:
+        return False
+    pid_path = _monitor_pid_path()
+    try:
+        creationflags = 0
+        if os.name == "nt":
+            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "fingent.cli.main", "--monitor"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creationflags,
+            cwd=str(Path.cwd()),
+        )
+        pid_path.write_text(str(proc.pid), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def _stop_monitor_process() -> bool:
+    status = _get_monitor_status()
+    pid = status.get("pid")
+    if not pid or not status.get("running"):
+        return False
+    try:
+        os.kill(pid, 15)
+    except Exception:
+        return False
+    try:
+        _monitor_pid_path().unlink(missing_ok=True)
+    except Exception:
+        pass
+    return True
+
+
+def _load_demo_results() -> None:
+    """Inject fake results for UI preview."""
+    now_ts = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    st.session_state.shock_results = {
+        "timestamp": now_ts,
+        "enabled": True,
+        "tags_used": [],
+        "events_scanned": 12,
+        "markets_scanned": 48,
+        "shocks_found": 3,
+        "shocks": [
+            {
+                "event_id": "demo_event_1",
+                "event_title": "Will Fed cut rates by June 2026?",
+                "sector": "economy",
+                "market_id": "demo_market_1",
+                "question": "Will the Fed cut rates by June 2026?",
+                "tags": ["economy", "fed"],
+                "current_mid": 0.62,
+                "baseline_mid": 0.48,
+                "delta": 0.14,
+                "age_minutes": 45.0,
+                "volume_24h": 125000,
+                "liquidity": 42000,
+                "spread_bps": 55,
+                "depth_usd": 1800,
+                "end_time": "2026-06-30T23:59:00Z",
+                "tenor_days": 150,
+                "timestamp": now_ts,
+            },
+            {
+                "event_id": "demo_event_2",
+                "event_title": "Will BTC hit $100k in 2026?",
+                "sector": "crypto",
+                "market_id": "demo_market_2",
+                "question": "Will Bitcoin hit $100k by end of 2026?",
+                "tags": ["crypto", "bitcoin"],
+                "current_mid": 0.41,
+                "baseline_mid": 0.56,
+                "delta": -0.15,
+                "age_minutes": 30.0,
+                "volume_24h": 98000,
+                "liquidity": 31000,
+                "spread_bps": 80,
+                "depth_usd": 1500,
+                "end_time": "2026-12-31T23:59:00Z",
+                "tenor_days": 330,
+                "timestamp": now_ts,
+            },
+            {
+                "event_id": "demo_event_3",
+                "event_title": "Will a major tariff be announced in 2026?",
+                "sector": "politics",
+                "market_id": "demo_market_3",
+                "question": "Will the US announce new major tariffs in 2026?",
+                "tags": ["politics", "trade"],
+                "current_mid": 0.33,
+                "baseline_mid": 0.25,
+                "delta": 0.08,
+                "age_minutes": 70.0,
+                "volume_24h": 56000,
+                "liquidity": 12000,
+                "spread_bps": 120,
+                "depth_usd": 900,
+                "end_time": "2026-11-01T23:59:00Z",
+                "tenor_days": 270,
+                "timestamp": now_ts,
+            },
+        ],
+        "latest_quotes": {},
+        "errors": [],
+    }
+
+    st.session_state.arb_results = {
+        "timestamp": now_ts,
+        "enabled": True,
+        "news_scanned": 3,
+        "news_triggered": 1,
+        "news_providers_used": ["demo"],
+        "events_found": 1,
+        "opportunities_raw": 1,
+        "opportunities_confirmed": 1,
+        "opportunities": [
+            {
+                "id": "demo_opp_1",
+                "timestamp": now_ts,
+                "type": "TERM_STRUCTURE",
+                "event_id": "demo_event_1",
+                "legs": [
+                    {
+                        "market_id": "demo_market_short",
+                        "question": "Will the Fed cut rates by June 2026?",
+                        "tenor_days": 120,
+                        "side": "SHORT_LEG",
+                        "current_mid": 0.64,
+                        "delta": 0.15,
+                    },
+                    {
+                        "market_id": "demo_market_long",
+                        "question": "Will the Fed cut rates by Dec 2026?",
+                        "tenor_days": 300,
+                        "side": "LONG_LEG",
+                        "current_mid": 0.52,
+                        "delta": 0.05,
+                    },
+                ],
+                "delta_diff": 0.10,
+                "edge": 0.06,
+                "confidence": 0.72,
+                "evidence": {},
+                "risk_flags": [],
+                "status": "CONFIRMED",
+            }
+        ],
+        "errors": [],
+    }
 
 
 if __name__ == "__main__":

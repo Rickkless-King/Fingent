@@ -225,6 +225,30 @@ scheduler:
     interval_minutes: 15
 
 # ==============================================
+# 预测市场监控 (低频全量 + 高频热点)
+# ==============================================
+monitoring:
+  enabled: true
+  # 低频全量扫描 (分钟)
+  low_freq_minutes: 30
+  # 高频热点扫描 (分钟)
+  high_freq_minutes: 3
+  # 热点列表长度
+  hotspots_limit: 30
+  # 热点最小成交量过滤
+  hotspot_min_volume: 3000
+  # 冷却时间 (分钟)，避免重复推送
+  cooldown_minutes: 30
+  # 每个标签最多拉取事件数
+  max_events_per_tag: 20
+  # 每个事件最多扫描市场数
+  max_markets_per_event: 10
+  # 热点风控过滤 (可覆盖 arbitrage.risk)
+  # 注：Polymarket 很多市场流动性较差，放宽限制以获取更多热点
+  hotspot_min_depth_usd: 0          # 允许无深度（使用 Gamma 价格）
+  hotspot_max_spread_bps: 50000     # 500% - 实际上禁用价差过滤
+
+# ==============================================
 # LLM 配置
 # ==============================================
 llm:
@@ -292,13 +316,69 @@ arbitrage:
     tariff: ["tariff", "import duty", "关税", "贸易壁垒"]
     trade_war: ["trade war", "贸易战", "trade conflict", "贸易摩擦"]
 
-  # 监控的 Polymarket 标签
+  # 监控的 Polymarket 标签 (使用官方 tag ID)
+  # 官方 Tag IDs: Politics=2, Finance=120, Crypto=21, Tech=1401, Geopolitics=100265
   polymarket_tags:
-    - "ai"
-    - "fed"
-    - "politics"
-    - "tech"
-    - "crypto"
+    - "2"        # Politics
+    - "120"      # Finance
+    - "21"       # Crypto
+    - "1401"     # Tech
+
+  # Polymarket 分区标签（使用 tag_id 召回）
+  polymarket_sector_tags:
+    politics:
+      - "2"           # Politics
+      - "100265"      # Geopolitics
+    finance:
+      - "120"         # Finance
+    economy:
+      - "120"         # Finance (economy 合并到 finance)
+    crypto:
+      - "21"          # Crypto
+    tech:
+      - "1401"        # Tech
+
+  # Polymarket 分区关键词（用于精准召回）
+  polymarket_sectors:
+    politics:
+      - "election"
+      - "president"
+      - "senate"
+      - "congress"
+      - "tariff"
+      - "trump"
+      - "biden"
+    finance:
+      - "earnings"
+      - "ipo"
+      - "stock"
+      - "nasdaq"
+      - "s&p"
+      - "spx"
+      - "gold"
+      - "oil"
+      - "bond"
+    economy:
+      - "inflation"
+      - "cpi"
+      - "rate cut"
+      - "fed"
+      - "unemployment"
+      - "gdp"
+    crypto:
+      - "bitcoin"
+      - "btc"
+      - "eth"
+      - "crypto"
+      - "etf"
+      - "halving"
+
+  # Polymarket 分区类别映射（Gamma API category）
+  polymarket_category_map:
+    politics: ["US-current-affairs", "Global Politics", "Ukraine & Russia"]
+    finance: ["Business"]
+    economy: ["Business", "Economy"]
+    crypto: ["Crypto"]
 
   # 期限结构策略参数
   term_structure:
@@ -309,14 +389,40 @@ arbitrage:
     # 每个 event 最多监控的 market 数量
     max_markets_per_event: 10
 
+  # 概率突变监控 (Probability Shock)
+  probability_shock:
+    enabled: true
+    # 监控窗口 (分钟) - 超过窗口会重置基准
+    lookback_minutes: 60
+    # 最小基准年龄 (秒) - 避免刚建立基准就触发
+    min_age_seconds: 60
+    # 触发阈值 (概率变化, 2% = 0.02)
+    # 注：大事件可达 30-60%，日常波动通常 1-3%
+    delta_threshold: 0.02
+    # 允许使用无订单簿报价 (Gamma/CLOB price)
+    # 注：Polymarket 很多市场流动性差，建议开启以获取更多结果
+    allow_illiquid_quotes: true
+    # 允许使用超过 lookback 的基准 (用于回溯演示)
+    allow_stale_baseline: false
+    # 每次扫描最多返回的结果数
+    max_results: 20
+    # 每个标签最多拉取的事件数
+    max_events_per_tag: 20
+    # API 拉取上限 (单次)
+    events_limit: 200
+    # 分页参数（用于获取更近的事件）
+    events_page_size: 200
+    events_max_pages: 10
+
   # 风控参数
+  # 注：Polymarket 很多市场流动性差，放宽条件以获取更多结果
   risk:
     # 最小 24h 成交量 (USD)
-    min_volume_24h: 5000
-    # 最大价差 (bps, 300 = 3%)
-    max_spread_bps: 300
+    min_volume_24h: 1000
+    # 最大价差 (bps, 50000 = 基本禁用)
+    max_spread_bps: 50000
     # 最小深度 (USD)
-    min_depth_usd: 1000
+    min_depth_usd: 0
     # 距离结算最小时间 (小时)
     min_time_to_settle_hours: 12
     # 同一 event 冷却时间 (秒)

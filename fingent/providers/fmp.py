@@ -38,6 +38,8 @@ class FMPProvider(BaseProvider):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._api_key: Optional[str] = None
+        self._blocked: bool = False
+        self._blocked_logged: bool = False
 
     def _initialize(self) -> None:
         """Initialize FMP client."""
@@ -104,6 +106,11 @@ class FMPProvider(BaseProvider):
         if not self.is_configured:
             self.logger.warning("FMP not configured, returning empty")
             return []
+        if self._blocked:
+            if not self._blocked_logged:
+                self.logger.warning("FMP access blocked (plan required), skipping")
+                self._blocked_logged = True
+            return []
 
         cache_key = f"general_news:{limit}:{from_date}:{to_date}"
         cached = self._get_cached(cache_key)
@@ -154,6 +161,12 @@ class FMPProvider(BaseProvider):
             return result
 
         except Exception as e:
+            if self._is_plan_blocked(e):
+                self._blocked = True
+                if not self._blocked_logged:
+                    self.logger.warning("FMP access blocked (plan required), skipping")
+                    self._blocked_logged = True
+                return []
             self.logger.warning(f"Failed to get news from FMP: {e}")
             # Try legacy endpoint as fallback
             return self._get_news_legacy(limit)
@@ -193,6 +206,12 @@ class FMPProvider(BaseProvider):
             return result
 
         except Exception as e:
+            if self._is_plan_blocked(e):
+                self._blocked = True
+                if not self._blocked_logged:
+                    self.logger.warning("FMP access blocked (plan required), skipping")
+                    self._blocked_logged = True
+                return []
             self.logger.warning(f"FMP legacy endpoint also failed: {e}")
             return []
 
@@ -212,6 +231,11 @@ class FMPProvider(BaseProvider):
             List of NewsItem objects
         """
         if not self.is_configured:
+            return []
+        if self._blocked:
+            if not self._blocked_logged:
+                self.logger.warning("FMP access blocked (plan required), skipping")
+                self._blocked_logged = True
             return []
 
         cache_key = f"stock_news:{symbol}:{limit}"
@@ -253,6 +277,12 @@ class FMPProvider(BaseProvider):
             return result
 
         except Exception as e:
+            if self._is_plan_blocked(e):
+                self._blocked = True
+                if not self._blocked_logged:
+                    self.logger.warning("FMP access blocked (plan required), skipping")
+                    self._blocked_logged = True
+                return []
             self.logger.warning(f"Failed to get stock news from FMP: {e}")
             return []
 
@@ -306,3 +336,9 @@ class FMPProvider(BaseProvider):
             return dt.isoformat()
         except ValueError:
             return date_str
+
+    @staticmethod
+    def _is_plan_blocked(error: Exception) -> bool:
+        """Detect plan-restricted errors to avoid repeated retries."""
+        msg = str(error)
+        return "HTTP 402" in msg or "HTTP 403" in msg

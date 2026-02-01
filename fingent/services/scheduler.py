@@ -189,6 +189,26 @@ class SchedulerService:
             minutes = intraday_config.get("interval_minutes", 15)
             self.add_interval_job("intraday_check", workflow_func, minutes)
 
+    def setup_monitoring_jobs(self, monitor_service) -> None:
+        """
+        Setup monitoring jobs from config.yaml.
+
+        Args:
+            monitor_service: Monitor service with scan_full/scan_hotspots methods
+        """
+        monitoring_cfg = self.config.get("monitoring", {})
+        if not monitoring_cfg.get("enabled", True):
+            logger.info("Monitoring disabled in config")
+            return
+
+        low_minutes = monitoring_cfg.get("low_freq_minutes", 30)
+        high_minutes = monitoring_cfg.get("high_freq_minutes", 3)
+
+        if low_minutes and low_minutes > 0:
+            self.add_interval_job("monitor_full_scan", monitor_service.scan_full, low_minutes)
+        if high_minutes and high_minutes > 0:
+            self.add_interval_job("monitor_hotspot_scan", monitor_service.scan_hotspots, high_minutes)
+
 
 def create_scheduler_service(
     settings: Optional[Settings] = None,

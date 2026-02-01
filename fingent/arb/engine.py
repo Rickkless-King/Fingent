@@ -44,6 +44,7 @@ class ArbEngine(LoggerMixin):
         self,
         provider: Optional[PolymarketProvider] = None,
         config: Optional[dict] = None,
+        shock_store: Optional[Any] = None,
     ):
         """
         Initialize arbitrage engine.
@@ -78,6 +79,7 @@ class ArbEngine(LoggerMixin):
 
         # Initialize provider
         self.provider = provider or PolymarketProvider()
+        self.shock_store = shock_store
 
         # Initialize strategy and risk manager
         self.strategy = TermStructureStrategy(config)
@@ -85,6 +87,9 @@ class ArbEngine(LoggerMixin):
 
         # In-memory snapshot store (can be moved to Redis/SQLite later)
         self._snapshots: dict[str, ArbSnapshot] = {}
+
+        # Separate snapshot store for probability shock baseline
+        self._shock_snapshots: dict[str, ArbSnapshot] = {}
 
         # Track detected opportunities
         self._opportunities: list[ArbOpportunity] = []
@@ -410,6 +415,560 @@ class ArbEngine(LoggerMixin):
             self.logger.info(f"Cleared {len(to_remove)} old snapshots")
 
         return len(to_remove)
+
+    # ==============================================
+    # Probability Shock Monitoring
+    # ==============================================
+
+    def scan_probability_shocks(
+        self,
+        tags: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
+        """
+        Scan Polymarket markets for fast probability shocks.
+
+        Uses a rolling baseline snapshot per market. If the baseline age exceeds
+        lookback window, it is reset. Only changes above delta_threshold are returned.
+        """
+        result = {
+            "timestamp": format_timestamp(now_utc()),
+            "enabled": self.enabled,
+            "tags_used": [],
+            "events_scanned": 0,
+            "markets_scanned": 0,
+            "shocks_found": 0,
+            "shocks": [],
+            "latest_quotes": {},
+            "errors": [],
+        }
+
+        if not self.enabled:
+            result["errors"].append("Arbitrage engine is disabled")
+            return result
+
+        shock_cfg = self.config.get("probability_shock", {})
+        if not shock_cfg.get("enabled", True):
+            result["errors"].append("Probability shock monitoring is disabled")
+            return result
+
+        if not self.provider.is_enabled:
+            result["errors"].append("Polymarket provider is disabled")
+            return result
+
+        # Config
+        max_results = shock_cfg.get("max_results", 20)
+        max_events_per_tag = shock_cfg.get("max_events_per_tag", 20)
+        events_limit = shock_cfg.get("events_limit", 50)
+        events_page_size = shock_cfg.get("events_page_size", 200)
+        events_max_pages = shock_cfg.get("events_max_pages", 10)
+
+        term_cfg = self.config.get("term_structure", {})
+        max_markets_per_event = term_cfg.get("max_markets_per_event", 10)
+
+        shocks = []
+
+        try:
+            sector_tag_inputs = self._resolve_sector_tag_inputs()
+            if sector_tag_inputs:
+                markets_to_scan: list[PolymarketMarket] = []
+                market_meta: dict[str, dict[str, str]] = {}
+                seen_event_ids: set[str] = set()
+
+                for sector, tag_inputs in sector_tag_inputs.items():
+                    tag_ids = self.provider.resolve_tag_ids(tag_inputs)
+                    if not tag_ids:
+                        continue
+
+                    for tag_id in tag_ids:
+                        tag_events = self._fetch_tag_events(
+                            tag_id=tag_id,
+                            limit=events_limit,
+                            page_size=events_page_size,
+                            max_pages=events_max_pages,
+                            max_events=max_events_per_tag,
+                        )
+
+                        for ev in tag_events:
+                            if not ev.event_id or ev.event_id in seen_event_ids:
+                                continue
+                            seen_event_ids.add(ev.event_id)
+                            markets = self._markets_from_event(ev)
+                            if not markets:
+                                markets = self.provider.get_markets_by_event(ev.event_id, ev.slug)
+                            if not markets:
+                                continue
+                            if max_markets_per_event:
+                                markets = markets[:max_markets_per_event]
+                            result["markets_scanned"] += len(markets)
+                            for market in markets:
+                                market_meta[market.market_id] = {
+                                    "event_id": ev.event_id,
+                                    "event_title": ev.title,
+                                    "sector": sector,
+                                }
+                                markets_to_scan.append(market)
+
+                result["events_scanned"] = len(seen_event_ids)
+
+                if self.shock_store:
+                    self._seed_baselines(markets_to_scan)
+                shocks, latest_quotes = self._scan_markets_for_shocks(markets_to_scan, market_meta)
+            else:
+                # Tags fallback
+                tags = tags or self.config.get("polymarket_tags", [])
+                tags = [t for t in tags if t]
+                result["tags_used"] = tags
+
+                if not tags:
+                    result["errors"].append("No Polymarket tags configured")
+                    return result
+
+                tag_ids = self.provider.resolve_tag_ids(tags)
+                if not tag_ids:
+                    result["errors"].append("No Polymarket tag ids resolved")
+                    return result
+                result["tags_used"] = tag_ids
+
+                events: list[Any] = []
+                seen_event_ids = set()
+                for tag_id in tag_ids:
+                    tag_events = self._fetch_tag_events(
+                        tag_id=tag_id,
+                        limit=events_limit,
+                        page_size=events_page_size,
+                        max_pages=events_max_pages,
+                        max_events=max_events_per_tag,
+                    )
+                    for ev in tag_events:
+                        if ev.event_id and ev.event_id not in seen_event_ids:
+                            events.append(ev)
+                            seen_event_ids.add(ev.event_id)
+
+                result["events_scanned"] = len(events)
+
+                markets_to_scan: list[PolymarketMarket] = []
+                market_meta: dict[str, dict[str, str]] = {}
+
+                for ev in events:
+                    markets = self._markets_from_event(ev)
+                    if not markets:
+                        markets = self.provider.get_markets_by_event(ev.event_id, ev.slug)
+                    if not markets:
+                        continue
+                    if max_markets_per_event:
+                        markets = markets[:max_markets_per_event]
+                    result["markets_scanned"] += len(markets)
+                    for market in markets:
+                        market_meta[market.market_id] = {
+                            "event_id": ev.event_id,
+                            "event_title": ev.title,
+                        }
+                        markets_to_scan.append(market)
+
+                if self.shock_store:
+                    self._seed_baselines(markets_to_scan)
+                shocks, latest_quotes = self._scan_markets_for_shocks(markets_to_scan, market_meta)
+
+            # Sort by absolute delta
+            shocks.sort(key=lambda x: abs(x.get("delta", 0)), reverse=True)
+            if max_results:
+                shocks = shocks[:max_results]
+
+            result["shocks_found"] = len(shocks)
+            result["shocks"] = shocks
+            result["latest_quotes"] = latest_quotes
+            if self.shock_store:
+                self._record_latest_quotes(latest_quotes)
+
+        except Exception as e:
+            self.logger.error(f"Probability shock scan error: {e}")
+            result["errors"].append(str(e))
+
+        return result
+
+    def _fetch_recent_events(
+        self,
+        limit: int,
+        page_size: int = 200,
+        max_pages: int = 10,
+    ) -> list[Any]:
+        """Fetch recent events by paging and filtering expired."""
+        events: list[Any] = []
+        now = datetime.now(timezone.utc)
+        offset = 0
+        pages = 0
+
+        while len(events) < limit and pages < max_pages:
+            batch = self.provider.get_events(tag=None, active=True, limit=page_size, offset=offset)
+            if not batch:
+                break
+            for ev in batch:
+                if self._is_event_active(ev, now):
+                    events.append(ev)
+                    if len(events) >= limit:
+                        break
+            offset += page_size
+            pages += 1
+
+        return events
+
+    def _fetch_tag_events(
+        self,
+        tag_id: str,
+        limit: int,
+        page_size: int = 200,
+        max_pages: int = 5,
+        max_events: Optional[int] = None,
+    ) -> list[Any]:
+        """Fetch recent events for a tag id with paging."""
+        events: list[Any] = []
+        offset = 0
+        pages = 0
+        cap = max_events or limit
+
+        while len(events) < cap and pages < max_pages:
+            batch = self.provider.get_events(
+                tag_id=tag_id,
+                active=True,
+                closed=False,
+                limit=min(page_size, limit),
+                offset=offset,
+                order="id",
+                ascending=False,
+            )
+            if not batch:
+                break
+            for ev in batch:
+                events.append(ev)
+                if len(events) >= cap:
+                    break
+            offset += page_size
+            pages += 1
+
+        return events
+
+    def _markets_from_event(self, ev) -> list[PolymarketMarket]:
+        """Parse markets directly from event payload when available."""
+        raw_markets = getattr(ev, "markets_data", None) or []
+        if not raw_markets:
+            return []
+        markets: list[PolymarketMarket] = []
+        for item in raw_markets:
+            market = self.provider._parse_market(item, ev.event_id)
+            if market:
+                markets.append(market)
+        return markets
+
+    def _resolve_sector_tag_inputs(self) -> dict[str, list[str]]:
+        """Resolve sector -> tag inputs (slugs/keywords) from config."""
+        sector_tags = self.config.get("polymarket_sector_tags", {})
+        if sector_tags:
+            return {k: v for k, v in sector_tags.items() if v}
+
+        sectors = self.config.get("polymarket_sectors", {})
+        if sectors:
+            return {k: v for k, v in sectors.items() if v}
+
+        return {}
+
+    @staticmethod
+    def _is_event_active(ev, now: datetime) -> bool:
+        """Check if event end_date is in the future (if available)."""
+        end_date = getattr(ev, "end_date", None) or getattr(ev, "end_time", None)
+        if end_date:
+            try:
+                end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+                return end_dt > now
+            except Exception:
+                pass
+        return True
+
+    @staticmethod
+    def _match_event_sector(ev, sectors: dict[str, list[str]], category_map: dict[str, list[str]]) -> Optional[str]:
+        """Match event to a sector based on category or keyword hits."""
+        category = (getattr(ev, "category", None) or "").strip()
+        if category_map:
+            for sector, cats in category_map.items():
+                if category in cats:
+                    return sector
+            # If category map is present and no match, skip keyword fallback
+            return None
+
+        # Fallback to keyword match on title/description
+        text = f"{getattr(ev, 'title', '')} {getattr(ev, 'description', '')}".lower()
+        for sector, keywords in sectors.items():
+            for kw in keywords:
+                kw_l = kw.lower()
+                if " " in kw_l:
+                    if kw_l in text:
+                        return sector
+                else:
+                    # Word boundary match for short tokens
+                    import re
+                    if re.search(rf"\\b{re.escape(kw_l)}\\b", text):
+                        return sector
+        return None
+
+    def scan_probability_shocks_for_markets(
+        self,
+        markets: list[PolymarketMarket],
+        market_meta: Optional[dict[str, dict[str, str]]] = None,
+    ) -> dict[str, Any]:
+        """
+        Scan a specific list of markets for probability shocks.
+
+        Args:
+            markets: List of PolymarketMarket objects
+            market_meta: Optional metadata per market_id (event_id/title)
+        """
+        result = {
+            "timestamp": format_timestamp(now_utc()),
+            "enabled": self.enabled,
+            "tags_used": [],
+            "events_scanned": 0,
+            "markets_scanned": len(markets),
+            "shocks_found": 0,
+            "shocks": [],
+            "latest_quotes": {},
+            "errors": [],
+        }
+
+        if not self.enabled:
+            result["errors"].append("Arbitrage engine is disabled")
+            return result
+
+        shock_cfg = self.config.get("probability_shock", {})
+        if not shock_cfg.get("enabled", True):
+            result["errors"].append("Probability shock monitoring is disabled")
+            return result
+
+        if not self.provider.is_enabled:
+            result["errors"].append("Polymarket provider is disabled")
+            return result
+
+        try:
+            if self.shock_store:
+                self._seed_baselines(markets)
+            shocks, latest_quotes = self._scan_markets_for_shocks(markets, market_meta or {})
+            result["shocks_found"] = len(shocks)
+            result["shocks"] = shocks
+            result["latest_quotes"] = latest_quotes
+            if self.shock_store:
+                self._record_latest_quotes(latest_quotes)
+        except Exception as e:
+            self.logger.error(f"Probability shock scan error: {e}")
+            result["errors"].append(str(e))
+
+        return result
+
+    def _scan_markets_for_shocks(
+        self,
+        markets: list[PolymarketMarket],
+        market_meta: Optional[dict[str, dict[str, str]]] = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+        """Evaluate a list of markets for probability shocks."""
+        shock_cfg = self.config.get("probability_shock", {})
+        lookback_minutes = shock_cfg.get("lookback_minutes", 60)
+        min_age_seconds = shock_cfg.get("min_age_seconds", 60)
+        delta_threshold = shock_cfg.get("delta_threshold", 0.05)
+        allow_illiquid = shock_cfg.get("allow_illiquid_quotes", False)
+        allow_stale = shock_cfg.get("allow_stale_baseline", False)
+
+        risk_cfg = self.config.get("risk", {})
+        min_volume = risk_cfg.get("min_volume_24h", 5000)
+        max_spread_bps = risk_cfg.get("max_spread_bps", 300)
+        min_depth_usd = risk_cfg.get("min_depth_usd", 1000)
+        min_time_to_settle_hours = risk_cfg.get("min_time_to_settle_hours", 12)
+
+        now = datetime.now(timezone.utc)
+        shocks: list[dict[str, Any]] = []
+        latest_quotes: dict[str, dict[str, Any]] = {}
+        meta = market_meta or {}
+
+        for market in markets:
+            if not market.active:
+                continue
+
+            # Basic volume filter
+            if market.volume < min_volume:
+                continue
+
+            # Time to settle filter
+            if min_time_to_settle_hours and market.tenor_days:
+                if market.tenor_days * 24 < min_time_to_settle_hours:
+                    continue
+
+            quote = self.provider.get_quote(market)
+            if not quote:
+                continue
+
+            latest_quotes[market.market_id] = {
+                "market_id": market.market_id,
+                "event_id": meta.get(market.market_id, {}).get("event_id", market.event_id),
+                "question": market.question,
+                "mid": quote.mid,
+                "end_time": market.end_time,
+                "timestamp": datetime.now(timezone.utc),
+            }
+
+            # Liquidity/spread filters
+            depth_usd = min(quote.depth_bid, quote.depth_ask)
+            if not allow_illiquid:
+                if quote.spread_bps > max_spread_bps:
+                    continue
+                if depth_usd < min_depth_usd:
+                    continue
+
+            # Baseline snapshot
+            snapshot = self._shock_snapshots.get(market.market_id)
+            if not snapshot:
+                baseline = None
+                if self.shock_store:
+                    baseline = self.shock_store.get_latest_price(market.market_id)
+                if baseline:
+                    baseline_ts = baseline["timestamp"]
+                    # Ensure baseline_ts is timezone-aware
+                    if baseline_ts.tzinfo is None:
+                        baseline_ts = baseline_ts.replace(tzinfo=timezone.utc)
+                    age_seconds = (now - baseline_ts).total_seconds()
+                    if age_seconds >= min_age_seconds or allow_stale:
+                        self._shock_snapshots[market.market_id] = ArbSnapshot(
+                            market_id=market.market_id,
+                            news_id="shock_store",
+                            first_seen_ts=baseline_ts.isoformat(),
+                            p0=baseline["mid"],
+                            quote0=None,
+                            volume0=None,
+                        )
+                        snapshot = self._shock_snapshots[market.market_id]
+                    else:
+                        self._shock_snapshots[market.market_id] = ArbSnapshot(
+                            market_id=market.market_id,
+                            news_id="shock_scan",
+                            first_seen_ts=format_timestamp(now_utc()),
+                            p0=quote.mid,
+                            quote0=quote.to_dict(),
+                            volume0=quote.volume_24h,
+                        )
+                        continue
+                else:
+                    self._shock_snapshots[market.market_id] = ArbSnapshot(
+                        market_id=market.market_id,
+                        news_id="shock_scan",
+                        first_seen_ts=format_timestamp(now_utc()),
+                        p0=quote.mid,
+                        quote0=quote.to_dict(),
+                        volume0=quote.volume_24h,
+                    )
+                    continue
+
+            # Age check
+            try:
+                baseline_ts = datetime.fromisoformat(
+                    snapshot.first_seen_ts.replace("Z", "+00:00")
+                )
+                age_seconds = (now - baseline_ts).total_seconds()
+            except Exception:
+                # Reset baseline on parse failure
+                self._shock_snapshots[market.market_id] = ArbSnapshot(
+                    market_id=market.market_id,
+                    news_id="shock_scan",
+                    first_seen_ts=format_timestamp(now_utc()),
+                    p0=quote.mid,
+                    quote0=quote.to_dict(),
+                    volume0=quote.volume_24h,
+                )
+                continue
+
+            # Reset baseline if too old
+            if age_seconds > lookback_minutes * 60 and not allow_stale:
+                self._shock_snapshots[market.market_id] = ArbSnapshot(
+                    market_id=market.market_id,
+                    news_id="shock_scan",
+                    first_seen_ts=format_timestamp(now_utc()),
+                    p0=quote.mid,
+                    quote0=quote.to_dict(),
+                    volume0=quote.volume_24h,
+                )
+                continue
+
+            # Skip if baseline too fresh
+            if age_seconds < min_age_seconds:
+                continue
+
+            delta = quote.mid - snapshot.p0
+            if abs(delta) < delta_threshold:
+                continue
+
+            meta_entry = meta.get(market.market_id, {})
+            shocks.append(
+                {
+                    "event_id": meta_entry.get("event_id", market.event_id),
+                    "event_title": meta_entry.get("event_title", ""),
+                    "sector": meta_entry.get("sector", ""),
+                    "market_id": market.market_id,
+                    "question": market.question,
+                    "tags": market.tags,
+                    "current_mid": quote.mid,
+                    "baseline_mid": snapshot.p0,
+                    "delta": delta,
+                    "age_minutes": age_seconds / 60.0,
+                    "volume_24h": quote.volume_24h or market.volume,
+                    "liquidity": market.liquidity,
+                    "spread_bps": quote.spread_bps,
+                    "depth_usd": depth_usd,
+                    "end_time": market.end_time,
+                    "tenor_days": market.tenor_days,
+                    "timestamp": format_timestamp(now_utc()),
+                }
+            )
+
+        return shocks, latest_quotes
+
+    def _seed_baselines(self, markets: list[PolymarketMarket]) -> None:
+        """Seed in-memory baselines from shock store."""
+        if not self.shock_store:
+            return
+        shock_cfg = self.config.get("probability_shock", {})
+        lookback_minutes = shock_cfg.get("lookback_minutes", 60)
+        min_age_seconds = shock_cfg.get("min_age_seconds", 60)
+        for market in markets:
+            if market.market_id in self._shock_snapshots:
+                continue
+            baseline = self.shock_store.get_baseline(
+                market_id=market.market_id,
+                lookback_minutes=lookback_minutes,
+                min_age_seconds=min_age_seconds,
+            )
+            if baseline:
+                self._shock_snapshots[market.market_id] = ArbSnapshot(
+                    market_id=market.market_id,
+                    news_id="shock_store",
+                    first_seen_ts=baseline["timestamp"].isoformat(),
+                    p0=baseline["mid"],
+                    quote0=None,
+                    volume0=None,
+                )
+
+    def _record_latest_quotes(self, latest_quotes: dict[str, dict[str, Any]]) -> None:
+        """Persist latest quotes to shock store."""
+        if not self.shock_store:
+            return
+        for market_id, info in latest_quotes.items():
+            end_time = info.get("end_time")
+            if isinstance(end_time, str) and end_time:
+                try:
+                    end_time = datetime.fromisoformat(end_time.replace("Z", "+00:00"))
+                except Exception:
+                    end_time = None
+            self.shock_store.record_price(
+                market_id=market_id,
+                event_id=info.get("event_id"),
+                question=info.get("question"),
+                mid=info.get("mid", 0.0),
+                timestamp=info.get("timestamp"),
+                end_time=end_time,
+            )
 
     # ==============================================
     # News Integration (Multi-provider with fallback)

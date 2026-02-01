@@ -8,6 +8,9 @@ Usage:
     # Run with scheduler
     python -m fingent.cli.main --scheduled
 
+    # Run prediction market monitor
+    python -m fingent.cli.main --monitor
+
     # Show status
     python -m fingent.cli.main --status
 """
@@ -26,6 +29,7 @@ from fingent.graph.builder import create_default_workflow, run_workflow
 from fingent.graph.state import create_initial_state
 from fingent.services.persistence import create_persistence_service
 from fingent.services.scheduler import create_scheduler_service
+from fingent.monitoring import create_shock_monitor
 from fingent.services.telegram import create_telegram_service
 
 console = Console()
@@ -136,8 +140,17 @@ def display_report(state: dict) -> None:
 @click.option("--once", is_flag=True, help="Run pipeline once and exit")
 @click.option("--scheduled", is_flag=True, help="Run with scheduler")
 @click.option("--status", is_flag=True, help="Show system status")
+@click.option("--monitor", is_flag=True, help="Run prediction market monitor")
+@click.option("--list-polymarket-tags", is_flag=True, help="List Polymarket tag ids")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose output")
-def main(once: bool, scheduled: bool, status: bool, verbose: bool) -> None:
+def main(
+    once: bool,
+    scheduled: bool,
+    status: bool,
+    monitor: bool,
+    list_polymarket_tags: bool,
+    verbose: bool,
+) -> None:
     """Fingent - Top-Down Macro Financial Analysis System"""
 
     # Setup logging
@@ -148,6 +161,10 @@ def main(once: bool, scheduled: bool, status: bool, verbose: bool) -> None:
         show_status()
         return
 
+    if list_polymarket_tags:
+        list_tags()
+        return
+
     if once:
         console.print("[bold]Running Fingent analysis...[/bold]\n")
         state = run_pipeline_once()
@@ -156,6 +173,10 @@ def main(once: bool, scheduled: bool, status: bool, verbose: bool) -> None:
 
     if scheduled:
         run_scheduled()
+        return
+
+    if monitor:
+        run_monitor()
         return
 
     # Default: show help
@@ -269,6 +290,79 @@ def run_scheduled() -> None:
         import time
         while True:
             time.sleep(1)
+
+
+def run_monitor() -> None:
+    """Run prediction market monitoring with scheduler."""
+    console.print("[bold]Starting prediction market monitor...[/bold]")
+    console.print("Press Ctrl+C to stop\n")
+
+    monitor = create_shock_monitor()
+    # Run an initial full scan to build hotspots
+    monitor.scan_full()
+
+    scheduler = create_scheduler_service()
+    scheduler.setup_monitoring_jobs(monitor)
+    scheduler.start()
+
+    # Show scheduled jobs
+    jobs = scheduler.get_jobs()
+    if jobs:
+        table = Table(title="Monitoring Jobs")
+        table.add_column("Job", style="cyan")
+        table.add_column("Next Run")
+
+        for job in jobs:
+            table.add_row(job["name"], job["next_run"] or "N/A")
+
+        console.print(table)
+    else:
+        console.print("[yellow]No monitoring jobs scheduled. Check config/config.yaml[/yellow]")
+
+    # Handle shutdown
+    def shutdown(signum, frame):
+        console.print("\n[yellow]Shutting down...[/yellow]")
+        scheduler.stop()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
+
+    # Keep running
+    try:
+        while True:
+            signal.pause()
+    except AttributeError:
+        import time
+        while True:
+            time.sleep(1)
+
+
+def list_tags(limit: int = 200) -> None:
+    """List Polymarket tags and ids for config."""
+    from fingent.providers.polymarket import PolymarketProvider
+
+    console.print("[bold]Fetching Polymarket tags...[/bold]")
+    provider = PolymarketProvider()
+    tags = provider.get_tags(limit=limit)
+
+    if not tags:
+        console.print("[yellow]No tags returned. Check network or Polymarket settings.[/yellow]")
+        return
+
+    table = Table(title=f"Polymarket Tags (limit={limit})")
+    table.add_column("ID", style="cyan")
+    table.add_column("Slug")
+    table.add_column("Label")
+
+    for tag in tags:
+        table.add_row(
+            str(tag.get("id", "")),
+            str(tag.get("slug", "")),
+            str(tag.get("label", tag.get("name", ""))),
+        )
+
+    console.print(table)
 
 
 if __name__ == "__main__":

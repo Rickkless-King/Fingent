@@ -69,6 +69,10 @@ peewee==3.19.0
 pillow==12.1.0
 platformdirs==4.5.1
 polygon==1.2.8
+poly-eip712-structs==2.0.1
+py-builder-signing-sdk==0.5.0
+py-clob-client==0.34.5
+py-order-utils==0.5.0
 propcache==0.4.1
 protobuf==6.33.4
 pyarrow==23.0.0

@@ -224,9 +224,11 @@ class PolymarketEvent:
     title: str
     slug: str
     description: str = ""
+    category: Optional[str] = None
     end_date: Optional[str] = None
     active: bool = True
     markets: list[str] = field(default_factory=list)  # market_ids
+    markets_data: list[dict[str, Any]] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -260,6 +262,7 @@ class PolymarketMarket:
     tags: list[str] = field(default_factory=list)
     volume: float = 0.0
     liquidity: float = 0.0
+    outcome_prices: list[float] = field(default_factory=list)
 
     # Calculated field for term structure
     tenor_days: int = 0  # Days until end_time
@@ -314,7 +317,16 @@ class PolymarketQuote:
         # Best bid/ask
         best_bid = float(bids[0]["price"]) if bids else 0.0
         best_ask = float(asks[0]["price"]) if asks else 1.0
-        mid = (best_bid + best_ask) / 2 if best_bid and best_ask else 0.5
+
+        # Calculate mid price based on available data
+        if bids and asks:
+            mid = (best_bid + best_ask) / 2
+        elif bids:
+            mid = best_bid
+        elif asks:
+            mid = best_ask
+        else:
+            mid = 0.5
 
         # Spread
         spread = best_ask - best_bid
@@ -417,4 +429,35 @@ class ArbOpportunity:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ArbOpportunity":
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
+class ShockEvent:
+    """
+    Probability shock event from prediction markets.
+    """
+    event_id: str
+    market_id: str
+    question: str
+    event_title: str = ""
+
+    # Metrics
+    current_mid: float = 0.0
+    baseline_mid: float = 0.0
+    delta: float = 0.0
+    confidence: float = 0.0
+
+    # Liquidity context
+    volume_24h: Optional[float] = None
+    depth_usd: Optional[float] = None
+    spread_bps: Optional[float] = None
+
+    timestamp: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ShockEvent":
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
