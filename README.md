@@ -181,7 +181,8 @@ Fingent/
 │   │   └── scheduler.py        # 定时任务
 │   │
 │   ├── ui/
-│   │   └── streamlit_app.py    # Streamlit 面板
+│   │   ├── streamlit_app.py    # Streamlit 主应用
+│   │   └── components.py       # 可复用 UI 组件
 │   │
 │   └── cli/
 │       └── main.py             # CLI 入口
@@ -519,38 +520,81 @@ Streamlit Dashboard 采用「晨报/简报」风格，面向普通投资者设�
 
 进入页面后你会看到 4 个 Tab（如果 Polymarket 启用）：
 
-1) **Latest Report**  
-   - 展示最新一次运行的“市场简报”
+1) **Report**
+   - 展示最新一次运行的"市场简报"
    - 包含方向评分、核心信号、新闻摘要、市场概览
+   - 支持 AI 生成分析摘要
 
-2) **History**  
-   - 查看历史运行结果与趋势图
+2) **History**
+   - 查看历史运行结果
+   - Score Trend 趋势图
 
-3) **Raw Data**  
+3) **Polymarket**
+   - **Scan Controls**：Delta 阈值滑块、流动性过滤、最小成交量设置
+   - **Shocks**：概率突变榜单（超过阈值的变化）
+   - **Top Movers**：变化最大的市场（不论是否超过阈值）
+   - **Most Liquid**：成交量最大的市场
+   - **Chart**：Delta 散点图（概率 vs 变化幅度，气泡大小=成交量）
+   - **Arbitrage**：期限结构套利扫描（折叠区域）
+
+4) **Raw Data**
    - 查看底层原始数据（适合调试）
+   - 宏观指标、市场报价、完整 JSON
 
-4) **Polymarket**  
-   - **Probability Shock Leaderboard**：扫描概率突变（你关注的四分区）  
-   - **Shock Details**：查看 24h 走势与区间变化  
-   - **Term Structure Arbitrage**：期限结构套利扫描（可选）
-   - **Monitoring Control**：页面内可一键启动/停止后台监控进程（自动采样写入 SQLite）
-   - **Demo Data**：可加载“伪造结果”预览 UI 布局（不会写入数据库）
+### UI 架构
 
-**常见按钮解释**
-- **Scan Probability Shocks**：扫描是否出现“赔率/概率突变”  
-- **Reset Shock Baselines**：重置基准（下次扫描才会比较变化）  
+Streamlit Dashboard 采用模块化设计：
+
+```
+fingent/ui/
+├── streamlit_app.py    # 主应用（~500 行）
+└── components.py       # 可复用组件（~320 行）
+```
+
+**组件清单** (`components.py`)：
+- `render_kpi_row` - KPI 指标卡片行
+- `render_shock_kpis` - Shock 扫描结果 KPI
+- `render_shock_table` - Shock 表格
+- `render_movers_table` - Top Movers 表格
+- `render_delta_scatter` - Delta 散点图
+- `render_news_list` - 新闻列表（带情绪图标）
+- `render_market_metrics` - 市场报价卡片
+- `render_arb_opportunity` - 套利机会卡片
+
+### Shock 扫描工作流程
+
+**重要：首次扫描建立基准，需等待 60 秒后再次扫描才能检测变化**
+
+```
+第一次点击 "Scan Shocks"
+    ↓
+系统记录当前价格作为基准（baseline）
+    ↓
+等待 60+ 秒（min_age_seconds 配置）
+    ↓
+第二次点击 "Scan Shocks"
+    ↓
+系统计算 delta = 当前价格 - 基准价格
+    ↓
+返回结果：
+  - all_deltas: 所有市场的价格变化（用于 Top Movers、Chart）
+  - shocks: 超过阈值的变化（用于 Shocks 表格）
+```
 
 **常见显示含义**
-- **Events Scanned**：扫描到的事件数量  
-- **Markets Scanned**：扫描到的市场数量  
-- **Shocks Found**：满足“变化阈值 + 流动性过滤”的突变数量  
-- **Tags**：fallback 标签召回数量（若使用分区标签策略，可能显示 0，属正常）
+- **Events**：扫描到的事件数量
+- **Markets**：扫描到的市场数量
+- **Shocks**：满足"变化阈值 + 流动性过滤"的突变数量
+- **Max Δ**：所有市场中最大的价格变化幅度
+- **Total deltas**：计算出 delta 的市场数量（调试信息）
 
-**调试/演示**
-- 如果市场缺少订单簿或基准太旧，可以在页面的 **Demo Settings** 勾选  
-  - “Allow synthetic quotes (no orderbook)”  
-  - “Allow stale baselines”  
-  这样可以快速看到突变效果（仅用于演示）。
+**为什么 delta 都是 0%？**
+- 这是正常现象——如果两次扫描间隔很短，市场价格可能没有变化
+- 等待更长时间（如 5-10 分钟）后再扫描，会看到实际变化
+
+**为什么 Shocks 数量为 0？**
+- 价格变化未超过阈值（默认 5%）
+- 可以降低 Delta Threshold 滑块（如 1%）来捕获更小的变化
 
 ### 新闻显示
 
@@ -696,10 +740,22 @@ python -m fingent.cli.main --list-polymarket-tags
 
 ## 常见问题
 
-**Q: 为什么第一次扫描“没有概率突变”？**  
-A: 第一次扫描主要用来建立基准（baseline），需要隔一段时间再扫才会检测到变化。
+**Q: 为什么第一次扫描"没有概率突变"？**
+A: 第一次扫描主要用来建立基准（baseline），需要等待至少 60 秒（`min_age_seconds` 配置）后再次扫描才会检测到变化。这是设计行为，不是 bug。
 
-**Q: 没有推送 Telegram？**  
+**Q: 为什么 Total deltas 显示 0？**
+A: 可能的原因：
+1. 第一次扫描刚建立基准，还没有可比较的数据
+2. 基准太旧或太新（需要在 `min_age_seconds` 和 `max_age_seconds` 之间）
+3. 需要重启 Streamlit 服务器以加载最新代码
+
+**Q: 为什么 delta 都显示 +0.00%？**
+A: 这是正常现象——两次扫描间隔短，市场价格没有变化。等待 5-10 分钟后再扫描会看到实际变化。
+
+**Q: 为什么 Max Δ 显示 N/A？**
+A: `all_deltas` 列表为空，通常是首次扫描或基准过期。等待 60 秒后再次扫描。
+
+**Q: 没有推送 Telegram？**
 A: 检查 `.env` 里的 `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` / `TELEGRAM_ENABLED`，以及 `monitoring.cooldown_minutes` 是否过长。
 
 

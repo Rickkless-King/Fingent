@@ -438,6 +438,7 @@ class ArbEngine(LoggerMixin):
             "markets_scanned": 0,
             "shocks_found": 0,
             "shocks": [],
+            "all_deltas": [],  # All computed deltas (for UI Top Movers, Chart)
             "latest_quotes": {},
             "errors": [],
         }
@@ -466,6 +467,8 @@ class ArbEngine(LoggerMixin):
         max_markets_per_event = term_cfg.get("max_markets_per_event", 10)
 
         shocks = []
+        all_deltas = []
+        latest_quotes = {}
 
         try:
             sector_tag_inputs = self._resolve_sector_tag_inputs()
@@ -512,7 +515,7 @@ class ArbEngine(LoggerMixin):
 
                 if self.shock_store:
                     self._seed_baselines(markets_to_scan)
-                shocks, latest_quotes = self._scan_markets_for_shocks(markets_to_scan, market_meta)
+                shocks, latest_quotes, all_deltas = self._scan_markets_for_shocks(markets_to_scan, market_meta)
             else:
                 # Tags fallback
                 tags = tags or self.config.get("polymarket_tags", [])
@@ -567,15 +570,17 @@ class ArbEngine(LoggerMixin):
 
                 if self.shock_store:
                     self._seed_baselines(markets_to_scan)
-                shocks, latest_quotes = self._scan_markets_for_shocks(markets_to_scan, market_meta)
+                shocks, latest_quotes, all_deltas = self._scan_markets_for_shocks(markets_to_scan, market_meta)
 
             # Sort by absolute delta
             shocks.sort(key=lambda x: abs(x.get("delta", 0)), reverse=True)
+            all_deltas.sort(key=lambda x: abs(x.get("delta", 0)), reverse=True)
             if max_results:
                 shocks = shocks[:max_results]
 
             result["shocks_found"] = len(shocks)
             result["shocks"] = shocks
+            result["all_deltas"] = all_deltas  # All deltas for UI (Top Movers, Chart)
             result["latest_quotes"] = latest_quotes
             if self.shock_store:
                 self._record_latest_quotes(latest_quotes)
@@ -729,6 +734,7 @@ class ArbEngine(LoggerMixin):
             "markets_scanned": len(markets),
             "shocks_found": 0,
             "shocks": [],
+            "all_deltas": [],
             "latest_quotes": {},
             "errors": [],
         }
@@ -749,9 +755,10 @@ class ArbEngine(LoggerMixin):
         try:
             if self.shock_store:
                 self._seed_baselines(markets)
-            shocks, latest_quotes = self._scan_markets_for_shocks(markets, market_meta or {})
+            shocks, latest_quotes, all_deltas = self._scan_markets_for_shocks(markets, market_meta or {})
             result["shocks_found"] = len(shocks)
             result["shocks"] = shocks
+            result["all_deltas"] = all_deltas
             result["latest_quotes"] = latest_quotes
             if self.shock_store:
                 self._record_latest_quotes(latest_quotes)
@@ -765,8 +772,12 @@ class ArbEngine(LoggerMixin):
         self,
         markets: list[PolymarketMarket],
         market_meta: Optional[dict[str, dict[str, str]]] = None,
-    ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
-        """Evaluate a list of markets for probability shocks."""
+    ) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], list[dict[str, Any]]]:
+        """Evaluate a list of markets for probability shocks.
+
+        Returns:
+            Tuple of (shocks, latest_quotes, all_deltas)
+        """
         shock_cfg = self.config.get("probability_shock", {})
         lookback_minutes = shock_cfg.get("lookback_minutes", 60)
         min_age_seconds = shock_cfg.get("min_age_seconds", 60)
@@ -782,6 +793,7 @@ class ArbEngine(LoggerMixin):
 
         now = datetime.now(timezone.utc)
         shocks: list[dict[str, Any]] = []
+        all_deltas: list[dict[str, Any]] = []  # Track ALL deltas for UI
         latest_quotes: dict[str, dict[str, Any]] = {}
         meta = market_meta or {}
 
@@ -897,33 +909,37 @@ class ArbEngine(LoggerMixin):
                 continue
 
             delta = quote.mid - snapshot.p0
-            if abs(delta) < delta_threshold:
-                continue
 
+            # Build delta entry (used for both shocks and all_deltas)
             meta_entry = meta.get(market.market_id, {})
-            shocks.append(
-                {
-                    "event_id": meta_entry.get("event_id", market.event_id),
-                    "event_title": meta_entry.get("event_title", ""),
-                    "sector": meta_entry.get("sector", ""),
-                    "market_id": market.market_id,
-                    "question": market.question,
-                    "tags": market.tags,
-                    "current_mid": quote.mid,
-                    "baseline_mid": snapshot.p0,
-                    "delta": delta,
-                    "age_minutes": age_seconds / 60.0,
-                    "volume_24h": quote.volume_24h or market.volume,
-                    "liquidity": market.liquidity,
-                    "spread_bps": quote.spread_bps,
-                    "depth_usd": depth_usd,
-                    "end_time": market.end_time,
-                    "tenor_days": market.tenor_days,
-                    "timestamp": format_timestamp(now_utc()),
-                }
-            )
+            delta_entry = {
+                "event_id": meta_entry.get("event_id", market.event_id),
+                "event_title": meta_entry.get("event_title", ""),
+                "sector": meta_entry.get("sector", ""),
+                "market_id": market.market_id,
+                "question": market.question,
+                "tags": market.tags,
+                "current_mid": quote.mid,
+                "baseline_mid": snapshot.p0,
+                "delta": delta,
+                "age_minutes": age_seconds / 60.0,
+                "volume_24h": quote.volume_24h or market.volume,
+                "liquidity": market.liquidity,
+                "spread_bps": quote.spread_bps,
+                "depth_usd": depth_usd,
+                "end_time": market.end_time,
+                "tenor_days": market.tenor_days,
+                "timestamp": format_timestamp(now_utc()),
+            }
 
-        return shocks, latest_quotes
+            # Always add to all_deltas for UI
+            all_deltas.append(delta_entry)
+
+            # Only add to shocks if above threshold
+            if abs(delta) >= delta_threshold:
+                shocks.append(delta_entry)
+
+        return shocks, latest_quotes, all_deltas
 
     def _seed_baselines(self, markets: list[PolymarketMarket]) -> None:
         """Seed in-memory baselines from shock store."""
